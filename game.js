@@ -527,7 +527,7 @@ function rebuildMesh() {
 // ---------- Player ----------
 const spawnX = Math.floor(WORLD_SIZE / 2);
 const spawnZ = Math.floor(WORLD_SIZE / 2);
-const spawnY = world.heightAt(spawnX, spawnZ) + 2;
+const spawnY = world.heightAt(spawnX, spawnZ) + 1 + PLAYER_HEIGHT;
 
 const player = {
   pos: new THREE.Vector3(spawnX + 0.5, spawnY, spawnZ + 0.5),
