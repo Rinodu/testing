@@ -31,6 +31,162 @@ const BLOCK_COLORS = {
 
 const HOTBAR_BLOCKS = [BLOCK.GRASS, BLOCK.DIRT, BLOCK.STONE, BLOCK.WOOD, BLOCK.LEAVES, BLOCK.SAND];
 
+// ---------- Procedural pixel-art texture atlas ----------
+const ATLAS_COLS = 4;
+const ATLAS_ROWS = 4;
+const CELL_PX = 16;
+
+const TEX_CELL = {
+  GRASS_TOP: [0, 0],
+  GRASS_SIDE: [1, 0],
+  DIRT: [2, 0],
+  STONE: [3, 0],
+  WOOD_TOP: [0, 1],
+  WOOD_SIDE: [1, 1],
+  LEAVES: [2, 1],
+  SAND: [3, 1],
+};
+
+const BLOCK_FACE_CELLS = {
+  [BLOCK.GRASS]: { top: TEX_CELL.GRASS_TOP, bottom: TEX_CELL.DIRT, side: TEX_CELL.GRASS_SIDE },
+  [BLOCK.DIRT]: { top: TEX_CELL.DIRT, bottom: TEX_CELL.DIRT, side: TEX_CELL.DIRT },
+  [BLOCK.STONE]: { top: TEX_CELL.STONE, bottom: TEX_CELL.STONE, side: TEX_CELL.STONE },
+  [BLOCK.WOOD]: { top: TEX_CELL.WOOD_TOP, bottom: TEX_CELL.WOOD_TOP, side: TEX_CELL.WOOD_SIDE },
+  [BLOCK.LEAVES]: { top: TEX_CELL.LEAVES, bottom: TEX_CELL.LEAVES, side: TEX_CELL.LEAVES },
+  [BLOCK.SAND]: { top: TEX_CELL.SAND, bottom: TEX_CELL.SAND, side: TEX_CELL.SAND },
+};
+
+function seededRandomFn(seed) {
+  let s = seed >>> 0;
+  return function () {
+    s ^= s << 13; s ^= s >>> 17; s ^= s << 5; s >>>= 0;
+    return s / 4294967295;
+  };
+}
+
+function clamp255(v) { return Math.max(0, Math.min(255, Math.round(v))); }
+
+function buildTextureAtlas() {
+  const canvas = document.createElement('canvas');
+  canvas.width = ATLAS_COLS * CELL_PX;
+  canvas.height = ATLAS_ROWS * CELL_PX;
+  const ctx = canvas.getContext('2d');
+  ctx.imageSmoothingEnabled = false;
+
+  function cellOrigin(cell) { return [cell[0] * CELL_PX, cell[1] * CELL_PX]; }
+
+  function noiseFill(x0, y0, base, variance, seed) {
+    const rnd = seededRandomFn(seed);
+    for (let py = 0; py < CELL_PX; py++) {
+      for (let px = 0; px < CELL_PX; px++) {
+        const n = (rnd() - 0.5) * 2 * variance;
+        ctx.fillStyle = `rgb(${clamp255(base[0] + n)},${clamp255(base[1] + n)},${clamp255(base[2] + n)})`;
+        ctx.fillRect(x0 + px, y0 + py, 1, 1);
+      }
+    }
+  }
+
+  function speckle(x0, y0, seed, count, colorFn) {
+    const rnd = seededRandomFn(seed);
+    for (let i = 0; i < count; i++) {
+      const px = Math.floor(rnd() * CELL_PX), py = Math.floor(rnd() * CELL_PX);
+      ctx.fillStyle = colorFn(rnd);
+      ctx.fillRect(x0 + px, y0 + py, 1, 1);
+    }
+  }
+
+  // DIRT
+  {
+    const [x0, y0] = cellOrigin(TEX_CELL.DIRT);
+    noiseFill(x0, y0, [120, 80, 45], 22, 101);
+    speckle(x0, y0, 202, 10, () => 'rgba(90,60,35,0.6)');
+  }
+
+  // STONE
+  {
+    const [x0, y0] = cellOrigin(TEX_CELL.STONE);
+    noiseFill(x0, y0, [130, 130, 130], 18, 303);
+    speckle(x0, y0, 404, 14, (rnd) => (rnd() < 0.5 ? 'rgba(90,90,90,0.5)' : 'rgba(175,175,175,0.5)'));
+  }
+
+  // SAND
+  {
+    const [x0, y0] = cellOrigin(TEX_CELL.SAND);
+    noiseFill(x0, y0, [222, 203, 148], 14, 505);
+  }
+
+  // GRASS_TOP
+  {
+    const [x0, y0] = cellOrigin(TEX_CELL.GRASS_TOP);
+    noiseFill(x0, y0, [95, 175, 70], 20, 606);
+    speckle(x0, y0, 707, 8, () => 'rgba(70,140,50,0.6)');
+  }
+
+  // GRASS_SIDE: dirt body with a jagged grass strip along the top edge
+  {
+    const [x0, y0] = cellOrigin(TEX_CELL.GRASS_SIDE);
+    noiseFill(x0, y0, [120, 80, 45], 20, 808);
+    const grassHeight = 5;
+    const rnd = seededRandomFn(909);
+    for (let py = 0; py < grassHeight; py++) {
+      for (let px = 0; px < CELL_PX; px++) {
+        if (py === grassHeight - 1 && rnd() < 0.5) continue;
+        const n = (rnd() - 0.5) * 2 * 18;
+        ctx.fillStyle = `rgb(${clamp255(95 + n)},${clamp255(175 + n)},${clamp255(70 + n)})`;
+        ctx.fillRect(x0 + px, y0 + py, 1, 1);
+      }
+    }
+  }
+
+  // WOOD_TOP: concentric growth rings
+  {
+    const [x0, y0] = cellOrigin(TEX_CELL.WOOD_TOP);
+    const cx = CELL_PX / 2, cy = CELL_PX / 2;
+    const rnd = seededRandomFn(1010);
+    for (let py = 0; py < CELL_PX; py++) {
+      for (let px = 0; px < CELL_PX; px++) {
+        const d = Math.hypot(px - cx + 0.5, py - cy + 0.5);
+        const ring = Math.floor(d) % 3;
+        const n = (rnd() - 0.5) * 10;
+        const base = ring === 0 ? [150, 105, 60] : ring === 1 ? [130, 90, 50] : [110, 75, 40];
+        ctx.fillStyle = `rgb(${clamp255(base[0] + n)},${clamp255(base[1] + n)},${clamp255(base[2] + n)})`;
+        ctx.fillRect(x0 + px, y0 + py, 1, 1);
+      }
+    }
+  }
+
+  // WOOD_SIDE: vertical bark stripes
+  {
+    const [x0, y0] = cellOrigin(TEX_CELL.WOOD_SIDE);
+    const rnd = seededRandomFn(1111);
+    const stripe = [];
+    for (let px = 0; px < CELL_PX; px++) stripe.push(rnd() < 0.35 ? -18 : rnd() < 0.5 ? 10 : 0);
+    for (let py = 0; py < CELL_PX; py++) {
+      for (let px = 0; px < CELL_PX; px++) {
+        const n = stripe[px] + (rnd() - 0.5) * 6;
+        ctx.fillStyle = `rgb(${clamp255(120 + n)},${clamp255(85 + n * 0.8)},${clamp255(48 + n * 0.6)})`;
+        ctx.fillRect(x0 + px, y0 + py, 1, 1);
+      }
+    }
+  }
+
+  // LEAVES
+  {
+    const [x0, y0] = cellOrigin(TEX_CELL.LEAVES);
+    noiseFill(x0, y0, [55, 120, 45], 26, 1212);
+    speckle(x0, y0, 1313, 10, (rnd) => (rnd() < 0.5 ? 'rgba(30,80,30,0.6)' : 'rgba(90,160,70,0.5)'));
+  }
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.magFilter = THREE.NearestFilter;
+  texture.minFilter = THREE.NearestFilter;
+  texture.generateMipmaps = false;
+  texture.flipY = false;
+  texture.wrapS = THREE.ClampToEdgeWrapping;
+  texture.wrapT = THREE.ClampToEdgeWrapping;
+  return texture;
+}
+
 // ---------- Simple seeded value noise ----------
 function makeNoise2D(seed) {
   const perm = new Uint8Array(256);
@@ -157,16 +313,31 @@ function generateWorld(world) {
   }
 }
 
-// ---------- Mesh building (face culling, per-block-type merged geometry) ----------
+// ---------- Mesh building (face culling, textured, per-vertex ambient occlusion) ----------
 const FACES = [
-  // dir, corners (x,y,z offsets), normal
-  { dir: [1, 0, 0], corners: [[1,0,0],[1,1,0],[1,1,1],[1,0,1]], shade: 0.75 },
-  { dir: [-1, 0, 0], corners: [[0,0,1],[0,1,1],[0,1,0],[0,0,0]], shade: 0.75 },
-  { dir: [0, 1, 0], corners: [[0,1,0],[0,1,1],[1,1,1],[1,1,0]], shade: 1.0 },
-  { dir: [0, -1, 0], corners: [[0,0,1],[0,0,0],[1,0,0],[1,0,1]], shade: 0.5 },
-  { dir: [0, 0, 1], corners: [[1,0,1],[1,1,1],[0,1,1],[0,0,1]], shade: 0.85 },
-  { dir: [0, 0, -1], corners: [[0,0,0],[0,1,0],[1,1,0],[1,0,0]], shade: 0.6 },
+  // dir, corners (x,y,z offsets), normal, which texture (top/bottom/side)
+  { dir: [1, 0, 0], corners: [[1,0,0],[1,1,0],[1,1,1],[1,0,1]], shade: 0.75, which: 'side' },
+  { dir: [-1, 0, 0], corners: [[0,0,1],[0,1,1],[0,1,0],[0,0,0]], shade: 0.75, which: 'side' },
+  { dir: [0, 1, 0], corners: [[0,1,0],[0,1,1],[1,1,1],[1,1,0]], shade: 1.0, which: 'top' },
+  { dir: [0, -1, 0], corners: [[0,0,1],[0,0,0],[1,0,0],[1,0,1]], shade: 0.5, which: 'bottom' },
+  { dir: [0, 0, 1], corners: [[1,0,1],[1,1,1],[0,1,1],[0,0,1]], shade: 0.85, which: 'side' },
+  { dir: [0, 0, -1], corners: [[0,0,0],[0,1,0],[1,1,0],[1,0,0]], shade: 0.6, which: 'side' },
 ];
+
+for (const face of FACES) {
+  face.axis = face.dir.findIndex((v) => v !== 0);
+  face.tangents = [0, 1, 2].filter((i) => i !== face.axis);
+}
+
+function vertexAOLevel(side1, side2, corner) {
+  if (side1 && side2) return 0;
+  return 3 - (side1 ? 1 : 0) - (side2 ? 1 : 0) - (corner ? 1 : 0);
+}
+const AO_LEVELS = [0.45, 0.65, 0.82, 1.0];
+
+const UV_LOCAL = [[0, 0], [0, 1], [1, 1], [1, 0]];
+const CELL_U = 1 / ATLAS_COLS;
+const CELL_V = 1 / ATLAS_ROWS;
 
 function buildWorldMesh(world, scene, existingMesh) {
   if (existingMesh) {
@@ -178,6 +349,7 @@ function buildWorldMesh(world, scene, existingMesh) {
   const positions = [];
   const normals = [];
   const colors = [];
+  const uvs = [];
   const indices = [];
   let vertCount = 0;
 
@@ -188,18 +360,43 @@ function buildWorldMesh(world, scene, existingMesh) {
       for (let y = 0; y < world.height; y++) {
         const block = world.get(x, y, z);
         if (block === BLOCK.AIR) continue;
-        const baseColor = BLOCK_COLORS[block] || 0xffffff;
+        const faceCells = BLOCK_FACE_CELLS[block];
         for (const face of FACES) {
           const nx = x + face.dir[0], ny = y + face.dir[1], nz = z + face.dir[2];
           if (world.get(nx, ny, nz) !== BLOCK.AIR) continue;
-          color.set(baseColor);
-          color.multiplyScalar(face.shade);
+
+          const cell = faceCells[face.which];
+          const u0 = cell[0] * CELL_U, v0 = cell[1] * CELL_V;
+
+          const aoValues = [];
           for (const corner of face.corners) {
+            const tb = corner[face.tangents[0]] === 1 ? 1 : -1;
+            const tc = corner[face.tangents[1]] === 1 ? 1 : -1;
+            const off1 = [0, 0, 0]; off1[face.tangents[0]] = tb;
+            const off2 = [0, 0, 0]; off2[face.tangents[1]] = tc;
+            const s1 = world.get(nx + off1[0], ny + off1[1], nz + off1[2]) !== BLOCK.AIR;
+            const s2 = world.get(nx + off2[0], ny + off2[1], nz + off2[2]) !== BLOCK.AIR;
+            const cn = world.get(nx + off1[0] + off2[0], ny + off1[1] + off2[1], nz + off1[2] + off2[2]) !== BLOCK.AIR;
+            aoValues.push(vertexAOLevel(s1, s2, cn));
+          }
+
+          const baseVert = vertCount;
+          for (let ci = 0; ci < 4; ci++) {
+            const corner = face.corners[ci];
             positions.push(x + corner[0], y + corner[1], z + corner[2]);
             normals.push(...face.dir);
+            const brightness = AO_LEVELS[aoValues[ci]];
+            color.setRGB(brightness, brightness, brightness);
             colors.push(color.r, color.g, color.b);
+            const [lu, lv] = UV_LOCAL[ci];
+            uvs.push(u0 + lu * CELL_U, v0 + lv * CELL_V);
           }
-          indices.push(vertCount, vertCount + 1, vertCount + 2, vertCount, vertCount + 2, vertCount + 3);
+
+          if (aoValues[0] + aoValues[2] > aoValues[1] + aoValues[3]) {
+            indices.push(baseVert, baseVert + 1, baseVert + 2, baseVert, baseVert + 2, baseVert + 3);
+          } else {
+            indices.push(baseVert, baseVert + 1, baseVert + 3, baseVert + 1, baseVert + 2, baseVert + 3);
+          }
           vertCount += 4;
         }
       }
@@ -210,32 +407,106 @@ function buildWorldMesh(world, scene, existingMesh) {
   geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
   geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
   geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
   geometry.setIndex(indices);
 
-  const material = new THREE.MeshLambertMaterial({ vertexColors: true });
+  const material = new THREE.MeshLambertMaterial({ map: atlasTexture, vertexColors: true });
   const mesh = new THREE.Mesh(geometry, material);
-  mesh.castShadow = false;
-  mesh.receiveShadow = false;
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
   scene.add(mesh);
   return mesh;
 }
 
 // ---------- Three.js setup ----------
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x87ceeb);
-scene.fog = new THREE.Fog(0x87ceeb, 40, 110);
+const SKY_TOP = 0x4a90d9;
+const SKY_HORIZON = 0xcfeeff;
+scene.fog = new THREE.Fog(SKY_HORIZON, 45, 130);
 
 const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 document.body.appendChild(renderer.domElement);
 
-const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 0.9);
+// Gradient sky dome
+const skyGeo = new THREE.SphereGeometry(400, 32, 16);
+const skyMat = new THREE.ShaderMaterial({
+  uniforms: {
+    topColor: { value: new THREE.Color(SKY_TOP) },
+    bottomColor: { value: new THREE.Color(SKY_HORIZON) },
+    offset: { value: 20 },
+    exponent: { value: 0.6 },
+  },
+  vertexShader: `
+    varying vec3 vWorldPosition;
+    void main() {
+      vec4 worldPosition = modelMatrix * vec4(position, 1.0);
+      vWorldPosition = worldPosition.xyz;
+      gl_Position = projectionMatrix * viewMatrix * worldPosition;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vWorldPosition;
+    uniform vec3 topColor;
+    uniform vec3 bottomColor;
+    uniform float offset;
+    uniform float exponent;
+    void main() {
+      float h = normalize(vWorldPosition + vec3(0.0, offset, 0.0)).y;
+      gl_FragColor = vec4(mix(bottomColor, topColor, max(pow(max(h, 0.0), exponent), 0.0)), 1.0);
+    }
+  `,
+  side: THREE.BackSide,
+  depthWrite: false,
+});
+scene.add(new THREE.Mesh(skyGeo, skyMat));
+
+// Sun glow sprite
+function buildSunGlowTexture() {
+  const c = document.createElement('canvas');
+  c.width = c.height = 256;
+  const ctx = c.getContext('2d');
+  const g = ctx.createRadialGradient(128, 128, 0, 128, 128, 128);
+  g.addColorStop(0, 'rgba(255,250,220,1)');
+  g.addColorStop(0.2, 'rgba(255,240,180,0.9)');
+  g.addColorStop(1, 'rgba(255,240,180,0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, 256, 256);
+  return new THREE.CanvasTexture(c);
+}
+const sunSprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: buildSunGlowTexture(), transparent: true, depthWrite: false }));
+sunSprite.scale.set(90, 90, 1);
+scene.add(sunSprite);
+
+const hemiLight = new THREE.HemisphereLight(0xbde0ff, 0x6b5a42, 0.85);
 scene.add(hemiLight);
-const sunLight = new THREE.DirectionalLight(0xffffff, 0.7);
-sunLight.position.set(50, 80, 30);
+
+const ambientLight = new THREE.AmbientLight(0xffffff, 0.15);
+scene.add(ambientLight);
+
+const sunLight = new THREE.DirectionalLight(0xfff3d6, 1.05);
+sunLight.position.set(WORLD_SIZE * 1.3, 45, WORLD_SIZE * 0.15);
+sunLight.castShadow = true;
+sunLight.shadow.mapSize.set(2048, 2048);
+sunLight.shadow.camera.left = -60;
+sunLight.shadow.camera.right = 60;
+sunLight.shadow.camera.top = 60;
+sunLight.shadow.camera.bottom = -60;
+sunLight.shadow.camera.near = 1;
+sunLight.shadow.camera.far = 220;
+sunLight.shadow.bias = -0.0015;
 scene.add(sunLight);
+
+const sunTarget = new THREE.Object3D();
+sunTarget.position.set(WORLD_SIZE / 2, 0, WORLD_SIZE / 2);
+scene.add(sunTarget);
+sunLight.target = sunTarget;
+
+sunSprite.position.copy(sunLight.position).normalize().multiplyScalar(350);
 
 window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
@@ -244,6 +515,7 @@ window.addEventListener('resize', () => {
 });
 
 // ---------- World init ----------
+const atlasTexture = buildTextureAtlas();
 const world = new World(WORLD_SIZE, WORLD_HEIGHT);
 generateWorld(world);
 let worldMesh = buildWorldMesh(world, scene, null);
