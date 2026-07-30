@@ -29,15 +29,6 @@ const BLOCK = {
   SAND: 6,
 };
 
-const BLOCK_COLORS = {
-  [BLOCK.GRASS]: 0x5fb347,
-  [BLOCK.DIRT]: 0x8b5a2b,
-  [BLOCK.STONE]: 0x8a8a8a,
-  [BLOCK.WOOD]: 0x6b4423,
-  [BLOCK.LEAVES]: 0x3a8f3a,
-  [BLOCK.SAND]: 0xdccb8a,
-};
-
 const BLOCK_NAMES = {
   [BLOCK.GRASS]: 'Rumput',
   [BLOCK.DIRT]: 'Tanah',
@@ -751,6 +742,24 @@ function showToast(text) {
 
 // ---------- World init ----------
 const atlasTexture = buildTextureAtlas();
+
+// Crops a block's "top" atlas cell into its own tiny image so HUD icons
+// (hotbar/inventory) show the same pixel-art texture as the in-world block
+// instead of a flat color swatch.
+const blockIconCache = {};
+function getBlockIconURL(blockType) {
+  if (blockIconCache[blockType]) return blockIconCache[blockType];
+  const cell = BLOCK_FACE_CELLS[blockType].top;
+  const c = document.createElement('canvas');
+  c.width = CELL_PX; c.height = CELL_PX;
+  const ctx = c.getContext('2d');
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(atlasTexture.image, cell[0] * CELL_PX, cell[1] * CELL_PX, CELL_PX, CELL_PX, 0, 0, CELL_PX, CELL_PX);
+  const url = c.toDataURL();
+  blockIconCache[blockType] = url;
+  return url;
+}
+
 const world = new World(WORLD_HEIGHT);
 const chunkMeshes = new Map(); // "cx,cz" -> THREE.Mesh
 
@@ -1335,7 +1344,7 @@ function renderHotbar() {
     slot.className = 'hotbar-slot' + (blockType === selectedBlock ? ' active' : '');
     const swatch = document.createElement('div');
     swatch.className = 'swatch';
-    swatch.style.background = '#' + BLOCK_COLORS[blockType].toString(16).padStart(6, '0');
+    swatch.style.backgroundImage = `url(${getBlockIconURL(blockType)})`;
     if (inventory[blockType] <= 0) swatch.style.opacity = '0.35';
     slot.appendChild(swatch);
     const count = document.createElement('span');
@@ -1365,8 +1374,11 @@ function renderInventoryPanel() {
     slot.className = 'inv-slot';
     const swatch = document.createElement('div');
     swatch.className = 'swatch';
-    const color = BLOCK_COLORS[id] !== undefined ? BLOCK_COLORS[id] : ITEM_META[id].color;
-    swatch.style.background = '#' + color.toString(16).padStart(6, '0');
+    if (BLOCK_FACE_CELLS[id]) {
+      swatch.style.backgroundImage = `url(${getBlockIconURL(id)})`;
+    } else {
+      swatch.style.background = '#' + ITEM_META[id].color.toString(16).padStart(6, '0');
+    }
     if ((inventory[id] || 0) <= 0) swatch.style.opacity = '0.35';
     slot.appendChild(swatch);
     const count = document.createElement('span');

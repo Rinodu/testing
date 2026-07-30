@@ -91,11 +91,16 @@ canvas {
   inset: 4px;
   border-radius: 2px;
   z-index: -1;
+  background-size: cover;
+  image-rendering: pixelated;
 }
 
+/* Health sits directly above the hunger row, which sits directly above the
+   hotbar -- stacked vertically (not side by side) so neither row's icons can
+   ever overlap each other or the hotbar underneath, regardless of window width. */
 #health {
   position: fixed;
-  bottom: 76px;
+  bottom: 104px;
   left: 50%;
   transform: translateX(-50%);
   z-index: 10;
@@ -117,8 +122,8 @@ canvas {
 
 #hunger {
   position: fixed;
-  bottom: 76px;
-  left: calc(50% + 130px);
+  bottom: 82px;
+  left: 50%;
   transform: translateX(-50%);
   z-index: 10;
   display: flex;
@@ -241,6 +246,8 @@ canvas {
   inset: 5px;
   border-radius: 2px;
   z-index: -1;
+  background-size: cover;
+  image-rendering: pixelated;
 }
 
 #inventoryPanel .hint {
