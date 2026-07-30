@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Blocky World - Minecraft-like Game</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="crosshair"></div>
+
+  <div id="hud">
+    <div id="hotbar"></div>
+  </div>
+
+  <div id="info">
+    <div>WASD: gerak &middot; Spasi: lompat &middot; Klik kiri: hancurkan blok &middot; Klik kanan: pasang blok</div>
+    <div>1-6: pilih blok &middot; Scroll: ganti blok &middot; Klik layar untuk mulai</div>
+  </div>
+
+  <div id="overlay">
+    <div id="overlay-content">
+      <h1>Blocky World</h1>
+      <p>Sebuah game bergaya Minecraft yang berjalan di browser.</p>
+      <button id="startBtn">Mulai Bermain</button>
+      <p class="hint">Klik untuk mengunci mouse dan mulai menjelajah.</p>
+    </div>
+  </div>
+
+  <script src="vendor/three.min.js"></script>
+  <script src="game.js"></script>
+</body>
+</html>
