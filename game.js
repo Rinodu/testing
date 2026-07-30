@@ -1,14 +1,23 @@
 /* Blocky World - a minimal Minecraft-like voxel game built with three.js */
 
 // ---------- Config ----------
-const WORLD_SIZE = 48;      // width/depth of the world (blocks)
-const WORLD_HEIGHT = 28;    // max height (blocks)
-const REACH = 6;            // block interaction reach distance
+const CHUNK_SIZE = 16;        // chunk width/depth in blocks
+const WORLD_HEIGHT = 28;      // max height (blocks)
+const RENDER_DISTANCE = 4;    // chunks kept meshed/visible around the player
+const UNLOAD_DISTANCE = 6;    // chunks farther than this get their mesh disposed
+const CHUNK_UPDATE_INTERVAL = 0.3; // seconds between chunk stream checks
+const REACH = 6;              // block interaction reach distance
 const GRAVITY = 20;
 const JUMP_SPEED = 8;
 const MOVE_SPEED = 6;
 const PLAYER_HEIGHT = 1.7;
 const PLAYER_RADIUS = 0.3;
+const DAY_LENGTH_SECONDS = 600; // one full day/night cycle
+const MAX_HEALTH = 20;
+const MAX_HUNGER = 20;
+const HUNGER_DRAIN_INTERVAL = 25; // seconds per -1 hunger point
+const MAX_MOBS = 60;
+const SAVE_KEY = 'blockyworld_save_v1';
 
 const BLOCK = {
   AIR: 0,
@@ -29,7 +38,43 @@ const BLOCK_COLORS = {
   [BLOCK.SAND]: 0xdccb8a,
 };
 
+const BLOCK_NAMES = {
+  [BLOCK.GRASS]: 'Rumput',
+  [BLOCK.DIRT]: 'Tanah',
+  [BLOCK.STONE]: 'Batu',
+  [BLOCK.WOOD]: 'Kayu',
+  [BLOCK.LEAVES]: 'Daun',
+  [BLOCK.SAND]: 'Pasir',
+};
+
 const HOTBAR_BLOCKS = [BLOCK.GRASS, BLOCK.DIRT, BLOCK.STONE, BLOCK.WOOD, BLOCK.LEAVES, BLOCK.SAND];
+
+// Non-block items (crafted goods / food). IDs are offset well past BLOCK ids
+// so they can share the same `inventory` dictionary without colliding.
+const ITEM = {
+  MEAT: 100,
+  STICK: 101,
+  STONE_PICKAXE: 102,
+  WOOD_AXE: 103,
+};
+
+const ITEM_META = {
+  [ITEM.MEAT]: { label: 'Daging', color: 0xaa4433 },
+  [ITEM.STICK]: { label: 'Stick', color: 0xc9a066 },
+  [ITEM.STONE_PICKAXE]: { label: 'Pickaxe Batu', color: 0x999999 },
+  [ITEM.WOOD_AXE]: { label: 'Kapak Kayu', color: 0x8b5a2b },
+};
+
+function itemLabel(id) {
+  return BLOCK_NAMES[id] || (ITEM_META[id] && ITEM_META[id].label) || ('Item ' + id);
+}
+
+// Simple recipes: shapeless (no fixed grid pattern, just totals of each input)
+const RECIPES = [
+  { inputs: { [BLOCK.WOOD]: 1 }, output: ITEM.STICK, outputCount: 4 },
+  { inputs: { [BLOCK.STONE]: 3, [ITEM.STICK]: 2 }, output: ITEM.STONE_PICKAXE, outputCount: 1 },
+  { inputs: { [BLOCK.WOOD]: 3, [ITEM.STICK]: 2 }, output: ITEM.WOOD_AXE, outputCount: 1 },
+];
 
 // Seconds needed to fully mine a block (no tool system, so it's a flat value per block type)
 const BLOCK_HARDNESS = {
@@ -82,6 +127,17 @@ function seededRandomFn(seed) {
     s ^= s << 13; s ^= s >>> 17; s ^= s << 5; s >>>= 0;
     return s / 4294967295;
   };
+}
+
+// Deterministic hash-based pseudo-random value for a given (x,z) column plus a
+// salt channel. Unlike a running RNG this doesn't depend on generation order,
+// which matters once terrain is generated chunk-by-chunk on demand instead of
+// in one raster pass (see World/generateChunkTerrain below).
+function hash2D(x, z, salt) {
+  let h = (x * 374761393 + z * 668265263 + salt * 2246822519) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  h = h ^ (h >>> 16);
+  return ((h >>> 0) % 1000000) / 1000000;
 }
 
 function clamp255(v) { return Math.max(0, Math.min(255, Math.round(v))); }
@@ -275,26 +331,56 @@ function fractalNoise(x, z, octaves = 4, persistence = 0.5, scale = 0.05) {
   return total / maxAmp;
 }
 
-// ---------- World data ----------
+// ---------- World data (chunk-based, generated on demand around the player) ----------
 class World {
-  constructor(size, height) {
-    this.size = size;
+  constructor(height) {
     this.height = height;
-    this.data = new Uint8Array(size * size * height);
+    this.chunks = new Map(); // "cx,cz" -> { data, cx, cz, dirty, modified, mobsSpawned }
   }
-  inBounds(x, y, z) {
-    return x >= 0 && x < this.size && z >= 0 && z < this.size && y >= 0 && y < this.height;
+  chunkKey(cx, cz) { return cx + ',' + cz; }
+  getChunkIfLoaded(cx, cz) { return this.chunks.get(this.chunkKey(cx, cz)); }
+  getOrCreateChunk(cx, cz) {
+    const key = this.chunkKey(cx, cz);
+    let chunk = this.chunks.get(key);
+    if (!chunk) {
+      chunk = {
+        cx, cz,
+        data: new Uint8Array(CHUNK_SIZE * CHUNK_SIZE * this.height),
+        dirty: true,
+        modified: false,
+        mobsSpawned: false,
+      };
+      this.chunks.set(key, chunk); // register before filling, so cross-chunk writes during
+                                    // generation (e.g. tree leaves) can't recurse forever
+      generateChunkTerrain(this, chunk);
+      applySavedChunkOverride(chunk);
+    }
+    return chunk;
   }
-  index(x, y, z) {
-    return (x * this.size + z) * this.height + y;
-  }
+  localIndex(lx, y, lz) { return (lx * CHUNK_SIZE + lz) * this.height + y; }
   get(x, y, z) {
-    if (!this.inBounds(x, y, z)) return BLOCK.AIR;
-    return this.data[this.index(x, y, z)];
+    if (y < 0 || y >= this.height) return BLOCK.AIR;
+    const cx = Math.floor(x / CHUNK_SIZE), cz = Math.floor(z / CHUNK_SIZE);
+    const chunk = this.getOrCreateChunk(cx, cz);
+    const lx = x - cx * CHUNK_SIZE, lz = z - cz * CHUNK_SIZE;
+    return chunk.data[this.localIndex(lx, y, lz)];
   }
   set(x, y, z, val) {
-    if (!this.inBounds(x, y, z)) return;
-    this.data[this.index(x, y, z)] = val;
+    if (y < 0 || y >= this.height) return;
+    const cx = Math.floor(x / CHUNK_SIZE), cz = Math.floor(z / CHUNK_SIZE);
+    const chunk = this.getOrCreateChunk(cx, cz);
+    const lx = x - cx * CHUNK_SIZE, lz = z - cz * CHUNK_SIZE;
+    chunk.data[this.localIndex(lx, y, lz)] = val;
+    chunk.dirty = true;
+    // a block on the chunk border affects the neighbor's face culling/AO too
+    if (lx === 0) this.markDirtyIfLoaded(cx - 1, cz);
+    if (lx === CHUNK_SIZE - 1) this.markDirtyIfLoaded(cx + 1, cz);
+    if (lz === 0) this.markDirtyIfLoaded(cx, cz - 1);
+    if (lz === CHUNK_SIZE - 1) this.markDirtyIfLoaded(cx, cz + 1);
+  }
+  markDirtyIfLoaded(cx, cz) {
+    const c = this.chunks.get(this.chunkKey(cx, cz));
+    if (c) c.dirty = true;
   }
   heightAt(x, z) {
     for (let y = this.height - 1; y >= 0; y--) {
@@ -304,10 +390,19 @@ class World {
   }
 }
 
-function generateWorld(world) {
+// Called by the player-facing edit functions (mining/placing) so those edits
+// get flagged for save/load, separately from the one-time procedural fill.
+function markPlayerEdit(x, z) {
+  const cx = Math.floor(x / CHUNK_SIZE), cz = Math.floor(z / CHUNK_SIZE);
+  const chunk = world.getChunkIfLoaded(cx, cz);
+  if (chunk) chunk.modified = true;
+}
+
+function generateChunkTerrain(world, chunk) {
   const baseHeight = 10;
-  for (let x = 0; x < world.size; x++) {
-    for (let z = 0; z < world.size; z++) {
+  const x0 = chunk.cx * CHUNK_SIZE, z0 = chunk.cz * CHUNK_SIZE;
+  for (let x = x0; x < x0 + CHUNK_SIZE; x++) {
+    for (let z = z0; z < z0 + CHUNK_SIZE; z++) {
       const n = fractalNoise(x, z);
       const h = Math.max(2, Math.min(world.height - 4, Math.floor(baseHeight + n * 8)));
       for (let y = 0; y <= h; y++) {
@@ -319,20 +414,20 @@ function generateWorld(world) {
       }
     }
   }
-  // scatter trees
-  let treeSeed = 42;
-  function rnd() { treeSeed ^= treeSeed << 13; treeSeed ^= treeSeed >>> 17; treeSeed ^= treeSeed << 5; treeSeed >>>= 0; return treeSeed / 4294967295; }
-  for (let x = 2; x < world.size - 2; x++) {
-    for (let z = 2; z < world.size - 2; z++) {
+  // scatter trees: placement/shape driven entirely by hash2D(x,z,salt) so it's
+  // identical no matter what order chunks happen to load in
+  const TREE_SEED = 42;
+  for (let x = x0; x < x0 + CHUNK_SIZE; x++) {
+    for (let z = z0; z < z0 + CHUNK_SIZE; z++) {
       const h = world.heightAt(x, z);
-      if (h > 0 && world.get(x, h, z) === BLOCK.GRASS && rnd() < 0.01) {
-        const trunkHeight = 3 + Math.floor(rnd() * 2);
+      if (h > 0 && world.get(x, h, z) === BLOCK.GRASS && hash2D(x, z, TREE_SEED) < 0.01) {
+        const trunkHeight = 3 + Math.floor(hash2D(x, z, TREE_SEED + 1) * 2);
         for (let t = 1; t <= trunkHeight; t++) world.set(x, h + t, z, BLOCK.WOOD);
         const topY = h + trunkHeight;
         for (let dx = -2; dx <= 2; dx++) {
           for (let dz = -2; dz <= 2; dz++) {
             for (let dy = -1; dy <= 1; dy++) {
-              if (Math.abs(dx) + Math.abs(dz) + Math.abs(dy) <= 3 && rnd() < 0.9) {
+              if (Math.abs(dx) + Math.abs(dz) + Math.abs(dy) <= 3 && hash2D(x + dx * 7, z + dz * 13, TREE_SEED + 2 + dy) < 0.9) {
                 if (world.get(x + dx, topY + dy, z + dz) === BLOCK.AIR) {
                   world.set(x + dx, topY + dy, z + dz, BLOCK.LEAVES);
                 }
@@ -371,13 +466,10 @@ const UV_LOCAL = [[0, 0], [0, 1], [1, 1], [1, 0]];
 const CELL_U = 1 / ATLAS_COLS;
 const CELL_V = 1 / ATLAS_ROWS;
 
-function buildWorldMesh(world, scene, existingMesh) {
-  if (existingMesh) {
-    scene.remove(existingMesh);
-    existingMesh.geometry.dispose();
-    existingMesh.material.dispose();
-  }
-
+// Builds a mesh for a single chunk's blocks (bounded region instead of the
+// whole world), so editing one chunk only ever re-generates that chunk.
+function buildChunkMesh(world, chunk) {
+  const x0 = chunk.cx * CHUNK_SIZE, z0 = chunk.cz * CHUNK_SIZE;
   const positions = [];
   const normals = [];
   const colors = [];
@@ -387,8 +479,8 @@ function buildWorldMesh(world, scene, existingMesh) {
 
   const color = new THREE.Color();
 
-  for (let x = 0; x < world.size; x++) {
-    for (let z = 0; z < world.size; z++) {
+  for (let x = x0; x < x0 + CHUNK_SIZE; x++) {
+    for (let z = z0; z < z0 + CHUNK_SIZE; z++) {
       for (let y = 0; y < world.height; y++) {
         const block = world.get(x, y, z);
         if (block === BLOCK.AIR) continue;
@@ -446,15 +538,16 @@ function buildWorldMesh(world, scene, existingMesh) {
   const mesh = new THREE.Mesh(geometry, material);
   mesh.castShadow = true;
   mesh.receiveShadow = true;
-  scene.add(mesh);
   return mesh;
 }
 
 // ---------- Three.js setup ----------
 const scene = new THREE.Scene();
-const SKY_TOP = 0x4a90d9;
-const SKY_HORIZON = 0xcfeeff;
-scene.fog = new THREE.Fog(SKY_HORIZON, 45, 130);
+const SKY_TOP_DAY = new THREE.Color(0x4a90d9);
+const SKY_HORIZON_DAY = new THREE.Color(0xcfeeff);
+const SKY_TOP_NIGHT = new THREE.Color(0x02030c);
+const SKY_HORIZON_NIGHT = new THREE.Color(0x0c1230);
+scene.fog = new THREE.Fog(0xcfeeff, 45, 130);
 
 const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
 
@@ -468,8 +561,8 @@ document.body.appendChild(renderer.domElement);
 const skyGeo = new THREE.SphereGeometry(400, 32, 16);
 const skyMat = new THREE.ShaderMaterial({
   uniforms: {
-    topColor: { value: new THREE.Color(SKY_TOP) },
-    bottomColor: { value: new THREE.Color(SKY_HORIZON) },
+    topColor: { value: new THREE.Color(SKY_TOP_DAY) },
+    bottomColor: { value: new THREE.Color(SKY_HORIZON_DAY) },
     offset: { value: 20 },
     exponent: { value: 0.6 },
   },
@@ -497,22 +590,30 @@ const skyMat = new THREE.ShaderMaterial({
 });
 scene.add(new THREE.Mesh(skyGeo, skyMat));
 
-// Sun glow sprite
-function buildSunGlowTexture() {
+// Sun & moon glow sprites
+function buildGlowTexture(colorStops) {
   const c = document.createElement('canvas');
   c.width = c.height = 256;
   const ctx = c.getContext('2d');
   const g = ctx.createRadialGradient(128, 128, 0, 128, 128, 128);
-  g.addColorStop(0, 'rgba(255,250,220,1)');
-  g.addColorStop(0.2, 'rgba(255,240,180,0.9)');
-  g.addColorStop(1, 'rgba(255,240,180,0)');
+  colorStops.forEach(([stop, color]) => g.addColorStop(stop, color));
   ctx.fillStyle = g;
   ctx.fillRect(0, 0, 256, 256);
   return new THREE.CanvasTexture(c);
 }
-const sunSprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: buildSunGlowTexture(), transparent: true, depthWrite: false }));
+const sunSprite = new THREE.Sprite(new THREE.SpriteMaterial({
+  map: buildGlowTexture([[0, 'rgba(255,250,220,1)'], [0.2, 'rgba(255,240,180,0.9)'], [1, 'rgba(255,240,180,0)']]),
+  transparent: true, depthWrite: false,
+}));
 sunSprite.scale.set(90, 90, 1);
 scene.add(sunSprite);
+
+const moonSprite = new THREE.Sprite(new THREE.SpriteMaterial({
+  map: buildGlowTexture([[0, 'rgba(230,235,255,1)'], [0.3, 'rgba(200,210,240,0.8)'], [1, 'rgba(200,210,240,0)']]),
+  transparent: true, depthWrite: false,
+}));
+moonSprite.scale.set(55, 55, 1);
+scene.add(moonSprite);
 
 const hemiLight = new THREE.HemisphereLight(0xbde0ff, 0x6b5a42, 0.85);
 scene.add(hemiLight);
@@ -521,7 +622,6 @@ const ambientLight = new THREE.AmbientLight(0xffffff, 0.15);
 scene.add(ambientLight);
 
 const sunLight = new THREE.DirectionalLight(0xfff3d6, 1.05);
-sunLight.position.set(WORLD_SIZE * 1.3, 45, WORLD_SIZE * 0.15);
 sunLight.castShadow = true;
 sunLight.shadow.mapSize.set(2048, 2048);
 sunLight.shadow.camera.left = -60;
@@ -534,11 +634,8 @@ sunLight.shadow.bias = -0.0015;
 scene.add(sunLight);
 
 const sunTarget = new THREE.Object3D();
-sunTarget.position.set(WORLD_SIZE / 2, 0, WORLD_SIZE / 2);
 scene.add(sunTarget);
 sunLight.target = sunTarget;
-
-sunSprite.position.copy(sunLight.position).normalize().multiplyScalar(350);
 
 window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
@@ -546,34 +643,198 @@ window.addEventListener('resize', () => {
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
+// ---------- Day/night cycle ----------
+// dayTime is a 0..1 fraction of a full cycle; 0 = sunrise, 0.5 = sunset.
+let dayTime = 0.25;
+let isNight = false;
+const dayColor = new THREE.Color();
+const nightColor = new THREE.Color();
+
+function updateDayNightCycle(dt) {
+  dayTime = (dayTime + dt / DAY_LENGTH_SECONDS) % 1;
+  const angle = dayTime * Math.PI * 2;
+  const sunHeight = Math.sin(angle);
+  const daylight = Math.max(0, sunHeight); // 0 at night, 1 at noon
+  isNight = sunHeight < 0.05;
+
+  const R = 300;
+  sunLight.position.set(Math.cos(angle) * R, sunHeight * R, Math.sin(angle) * 0.3 * R + player.pos.z);
+  sunTarget.position.set(player.pos.x, 0, player.pos.z);
+  sunSprite.position.copy(sunLight.position).add(new THREE.Vector3(0, 0, 0));
+  moonSprite.position.set(-sunLight.position.x, -sunHeight * R, -sunLight.position.z + player.pos.z * 2);
+  sunSprite.visible = sunHeight > -0.05;
+  moonSprite.visible = sunHeight < 0.15;
+
+  sunLight.intensity = Math.max(0, daylight) * 1.05;
+  hemiLight.intensity = 0.15 + daylight * 0.7;
+  ambientLight.intensity = 0.08 + daylight * 0.12;
+
+  const mix = Math.max(0, Math.min(1, daylight + 0.15));
+  dayColor.copy(SKY_TOP_DAY);
+  nightColor.copy(SKY_TOP_NIGHT);
+  skyMat.uniforms.topColor.value.copy(nightColor).lerp(dayColor, mix);
+  dayColor.copy(SKY_HORIZON_DAY);
+  nightColor.copy(SKY_HORIZON_NIGHT);
+  skyMat.uniforms.bottomColor.value.copy(nightColor).lerp(dayColor, mix);
+  scene.fog.color.copy(skyMat.uniforms.bottomColor.value);
+}
+
+// ---------- Save / Load (localStorage; chunks store only player-modified data,
+// unmodified terrain is always regenerated deterministically from the seed) ----------
+let pendingSave = null;
+try {
+  const raw = localStorage.getItem(SAVE_KEY);
+  if (raw) pendingSave = JSON.parse(raw);
+} catch (e) { /* corrupted/unavailable storage: just start fresh */ }
+
+function serializeChunkData(data) {
+  let bin = '';
+  for (let i = 0; i < data.length; i++) bin += String.fromCharCode(data[i]);
+  return btoa(bin);
+}
+function deserializeChunkData(str) {
+  const bin = atob(str);
+  const arr = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+  return arr;
+}
+
+// Applied right after a chunk's procedural terrain is generated, so any saved
+// player edits for that chunk overwrite the freshly-generated base data.
+function applySavedChunkOverride(chunk) {
+  if (!pendingSave || !pendingSave.chunks) return;
+  const found = pendingSave.chunks.find((c) => c.cx === chunk.cx && c.cz === chunk.cz);
+  if (found) {
+    chunk.data.set(deserializeChunkData(found.data));
+    chunk.modified = true;
+  }
+}
+
+function saveGame() {
+  const modifiedChunks = [];
+  for (const chunk of world.chunks.values()) {
+    if (chunk.modified) modifiedChunks.push({ cx: chunk.cx, cz: chunk.cz, data: serializeChunkData(chunk.data) });
+  }
+  const save = {
+    version: 1,
+    player: {
+      x: player.pos.x, y: player.pos.y, z: player.pos.z,
+      yaw: player.yaw, pitch: player.pitch,
+      health: player.health, hunger: player.hunger,
+    },
+    inventory,
+    dayTime,
+    chunks: modifiedChunks,
+  };
+  try {
+    localStorage.setItem(SAVE_KEY, JSON.stringify(save));
+    showToast('Game disimpan');
+  } catch (e) {
+    console.warn('Save failed', e);
+  }
+}
+
+// ---------- Toast (small ephemeral on-screen message) ----------
+let toastTimer = null;
+function showToast(text) {
+  let el = document.getElementById('toast');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'toast';
+    document.body.appendChild(el);
+  }
+  el.textContent = text;
+  el.classList.add('visible');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('visible'), 2000);
+}
+
 // ---------- World init ----------
 const atlasTexture = buildTextureAtlas();
-const world = new World(WORLD_SIZE, WORLD_HEIGHT);
-generateWorld(world);
-let worldMesh = buildWorldMesh(world, scene, null);
+const world = new World(WORLD_HEIGHT);
+const chunkMeshes = new Map(); // "cx,cz" -> THREE.Mesh
 
-function rebuildMesh() {
-  worldMesh = buildWorldMesh(world, scene, worldMesh);
+function remeshChunk(cx, cz) {
+  const key = world.chunkKey(cx, cz);
+  const chunk = world.getChunkIfLoaded(cx, cz);
+  if (!chunk) return;
+  const old = chunkMeshes.get(key);
+  if (old) { scene.remove(old); old.geometry.dispose(); old.material.dispose(); }
+  const mesh = buildChunkMesh(world, chunk);
+  scene.add(mesh);
+  chunkMeshes.set(key, mesh);
+  chunk.dirty = false;
+}
+
+// Re-meshes the chunk containing (x,z) plus any dirty already-loaded
+// neighbors (a block placed/broken on a border affects neighboring meshes).
+function remeshAround(x, z) {
+  const cx = Math.floor(x / CHUNK_SIZE), cz = Math.floor(z / CHUNK_SIZE);
+  for (let dx = -1; dx <= 1; dx++) {
+    for (let dz = -1; dz <= 1; dz++) {
+      const ncx = cx + dx, ncz = cz + dz;
+      const chunk = world.getChunkIfLoaded(ncx, ncz);
+      if (chunk && chunk.dirty && chunkMeshes.has(world.chunkKey(ncx, ncz))) remeshChunk(ncx, ncz);
+    }
+  }
+}
+
+let chunkUpdateAccumulator = 0;
+function updateChunkStreaming(dt) {
+  chunkUpdateAccumulator += dt;
+  if (chunkUpdateAccumulator < CHUNK_UPDATE_INTERVAL) return;
+  chunkUpdateAccumulator = 0;
+
+  const pcx = Math.floor(player.pos.x / CHUNK_SIZE);
+  const pcz = Math.floor(player.pos.z / CHUNK_SIZE);
+
+  for (let dx = -RENDER_DISTANCE; dx <= RENDER_DISTANCE; dx++) {
+    for (let dz = -RENDER_DISTANCE; dz <= RENDER_DISTANCE; dz++) {
+      if (dx * dx + dz * dz > RENDER_DISTANCE * RENDER_DISTANCE) continue;
+      const cx = pcx + dx, cz = pcz + dz;
+      const key = world.chunkKey(cx, cz);
+      const chunk = world.getOrCreateChunk(cx, cz);
+      const isNewMesh = !chunkMeshes.has(key);
+      if (chunk.dirty || isNewMesh) remeshChunk(cx, cz);
+      if (!chunk.mobsSpawned) {
+        chunk.mobsSpawned = true;
+        maybeSpawnMobsInChunk(chunk);
+      }
+    }
+  }
+
+  for (const [key, mesh] of chunkMeshes) {
+    const [cx, cz] = key.split(',').map(Number);
+    if (Math.hypot(cx - pcx, cz - pcz) > UNLOAD_DISTANCE) {
+      scene.remove(mesh);
+      mesh.geometry.dispose();
+      mesh.material.dispose();
+      chunkMeshes.delete(key);
+    }
+  }
+
+  despawnFarMobs();
 }
 
 // ---------- Player ----------
-const spawnX = Math.floor(WORLD_SIZE / 2);
-const spawnZ = Math.floor(WORLD_SIZE / 2);
-const spawnY = world.heightAt(spawnX, spawnZ) + 1 + PLAYER_HEIGHT;
+const spawnX = 0, spawnZ = 0;
+const savedPlayer = pendingSave && pendingSave.player;
+const spawnY = savedPlayer ? savedPlayer.y : world.heightAt(spawnX, spawnZ) + 1 + PLAYER_HEIGHT;
 
-const MAX_HEALTH = 20;
 const player = {
-  pos: new THREE.Vector3(spawnX + 0.5, spawnY, spawnZ + 0.5),
+  pos: new THREE.Vector3(savedPlayer ? savedPlayer.x : spawnX + 0.5, spawnY, savedPlayer ? savedPlayer.z : spawnZ + 0.5),
   vel: new THREE.Vector3(0, 0, 0),
-  yaw: 0,
-  pitch: 0,
+  yaw: savedPlayer ? savedPlayer.yaw : 0,
+  pitch: savedPlayer ? savedPlayer.pitch : 0,
   onGround: false,
-  health: MAX_HEALTH,
+  health: savedPlayer ? savedPlayer.health : MAX_HEALTH,
+  hunger: savedPlayer ? savedPlayer.hunger : MAX_HUNGER,
 };
+if (pendingSave && typeof pendingSave.dayTime === 'number') dayTime = pendingSave.dayTime;
 
 camera.position.copy(player.pos);
 
-// ---------- Health HUD ----------
+// ---------- Health & Hunger HUD ----------
 const healthEl = document.getElementById('health');
 function renderHealth() {
   healthEl.innerHTML = '';
@@ -582,12 +843,27 @@ function renderHealth() {
     const filled = player.health >= (i + 1) * 2;
     const half = !filled && player.health > i * 2;
     heart.className = 'heart ' + (filled || half ? 'full' : 'empty');
-    heart.textContent = half ? '♥' : '♥';
+    heart.textContent = '♥';
     heart.style.opacity = half ? '0.5' : '1';
     healthEl.appendChild(heart);
   }
 }
 renderHealth();
+
+const hungerEl = document.getElementById('hunger');
+function renderHunger() {
+  hungerEl.innerHTML = '';
+  for (let i = 0; i < MAX_HUNGER / 2; i++) {
+    const icon = document.createElement('div');
+    const filled = player.hunger >= (i + 1) * 2;
+    const half = !filled && player.hunger > i * 2;
+    icon.className = 'drumstick ' + (filled || half ? 'full' : 'empty');
+    icon.textContent = '🍗';
+    icon.style.opacity = half ? '0.5' : '1';
+    hungerEl.appendChild(icon);
+  }
+}
+renderHunger();
 
 let lastDamageTime = -Infinity;
 function damagePlayer(amount) {
@@ -597,10 +873,45 @@ function damagePlayer(amount) {
   player.health = Math.max(0, player.health - amount);
   renderHealth();
   if (player.health <= 0) {
-    player.pos.set(spawnX + 0.5, spawnY, spawnZ + 0.5);
+    player.pos.set(spawnX + 0.5, world.heightAt(spawnX, spawnZ) + 1 + PLAYER_HEIGHT, spawnZ + 0.5);
     player.vel.set(0, 0, 0);
     player.health = MAX_HEALTH;
+    player.hunger = MAX_HUNGER;
     renderHealth();
+    renderHunger();
+  }
+}
+
+let hungerAccumulator = 0;
+let lastStarveDamageTime = -Infinity;
+function updateHunger(dt) {
+  hungerAccumulator += dt;
+  if (hungerAccumulator >= HUNGER_DRAIN_INTERVAL) {
+    hungerAccumulator = 0;
+    if (player.hunger > 0) {
+      player.hunger -= 1;
+      renderHunger();
+    }
+  }
+  const now = performance.now() / 1000;
+  if (player.hunger <= 0 && player.health > 0 && now - lastStarveDamageTime > 3) {
+    lastStarveDamageTime = now;
+    player.health = Math.max(0, player.health - 1);
+    renderHealth();
+  } else if (player.hunger >= 18 && player.health < MAX_HEALTH && now - lastStarveDamageTime > 4) {
+    lastStarveDamageTime = now;
+    player.health = Math.min(MAX_HEALTH, player.health + 1);
+    renderHealth();
+  }
+}
+
+function eatMeat() {
+  if (inventory[ITEM.MEAT] > 0 && player.hunger < MAX_HUNGER) {
+    inventory[ITEM.MEAT]--;
+    player.hunger = Math.min(MAX_HUNGER, player.hunger + 4);
+    renderHunger();
+    renderInventoryPanel();
+    showToast('Makan daging (+4 hunger)');
   }
 }
 
@@ -608,18 +919,23 @@ function damagePlayer(amount) {
 const itemDrops = [];
 const DROP_LIFETIME = 60;
 
-function spawnItemDrop(x, y, z, blockType) {
+function spawnItemDrop(x, y, z, itemType) {
   const geo = new THREE.BoxGeometry(0.35, 0.35, 0.35);
-  const cell = BLOCK_FACE_CELLS[blockType].top;
-  applyAtlasCellToBox(geo, cell);
-  const mat = new THREE.MeshLambertMaterial({ map: atlasTexture });
+  let mat;
+  if (BLOCK_FACE_CELLS[itemType]) {
+    applyAtlasCellToBox(geo, BLOCK_FACE_CELLS[itemType].top);
+    mat = new THREE.MeshLambertMaterial({ map: atlasTexture });
+  } else {
+    const meta = ITEM_META[itemType];
+    mat = new THREE.MeshLambertMaterial({ color: (meta && meta.color) || 0xffffff });
+  }
   const mesh = new THREE.Mesh(geo, mat);
   mesh.position.set(x, y, z);
   mesh.castShadow = true;
   scene.add(mesh);
   itemDrops.push({
     mesh,
-    blockType,
+    itemType,
     vel: new THREE.Vector3((Math.random() - 0.5) * 1.5, 3, (Math.random() - 0.5) * 1.5),
     spawnTime: performance.now() / 1000,
     bobSeed: Math.random() * Math.PI * 2,
@@ -652,7 +968,7 @@ function updateItemDrops(dt) {
     const dz = player.pos.z - drop.mesh.position.z;
     const dy = (player.pos.y - PLAYER_HEIGHT * 0.5) - drop.mesh.position.y;
     if (dx * dx + dy * dy + dz * dz < 1.2 * 1.2) {
-      addToInventory(drop.blockType, 1);
+      addToInventory(drop.itemType, 1);
       scene.remove(drop.mesh);
       drop.mesh.geometry.dispose();
       drop.mesh.material.dispose();
@@ -796,6 +1112,7 @@ const MOB_SPEED = { [MOB_TYPES.COW]: 1.2, [MOB_TYPES.GOAT]: 1.6, [MOB_TYPES.ZOMB
 const mobs = [];
 
 function spawnMob(type, x, z) {
+  if (mobs.length >= MAX_MOBS) return;
   const built = MOB_FACTORY[type]();
   const y = world.heightAt(Math.floor(x), Math.floor(z)) + 1;
   built.group.position.set(x, y, z);
@@ -817,24 +1134,45 @@ function spawnMob(type, x, z) {
   });
 }
 
-function findSpawnSpot() {
-  for (let attempt = 0; attempt < 30; attempt++) {
-    const x = Math.floor(Math.random() * (world.size - 4)) + 2;
-    const z = Math.floor(Math.random() * (world.size - 4)) + 2;
-    const h = world.heightAt(x, z);
-    if (h > 0 && world.get(x, h, z) === BLOCK.GRASS && Math.hypot(x - spawnX, z - spawnZ) > 6) {
-      return { x: x + 0.5, z: z + 0.5 };
-    }
+// Spawns a handful of mobs the first time a chunk becomes visible, instead of
+// an upfront fixed count -- scales naturally with how much world is explored.
+// Zombie odds go up at night as a simplified stand-in for full light-level
+// based spawning (see blueprint section 7 for the "real" version of this).
+function maybeSpawnMobsInChunk(chunk) {
+  const x0 = chunk.cx * CHUNK_SIZE, z0 = chunk.cz * CHUNK_SIZE;
+  const randomSpotInChunk = () => ({
+    x: x0 + Math.floor(Math.random() * CHUNK_SIZE),
+    z: z0 + Math.floor(Math.random() * CHUNK_SIZE),
+  });
+
+  if (Math.random() < 0.35) {
+    const p = randomSpotInChunk();
+    const h = world.heightAt(p.x, p.z);
+    if (h > 0 && world.get(p.x, h, p.z) === BLOCK.GRASS) spawnMob(MOB_TYPES.COW, p.x + 0.5, p.z + 0.5);
   }
-  return { x: spawnX + 0.5 + 8, z: spawnZ + 0.5 + 8 };
+  if (Math.random() < 0.2) {
+    const p = randomSpotInChunk();
+    const h = world.heightAt(p.x, p.z);
+    if (h > 0 && world.get(p.x, h, p.z) === BLOCK.GRASS) spawnMob(MOB_TYPES.GOAT, p.x + 0.5, p.z + 0.5);
+  }
+  const zombieChance = isNight ? 0.18 : 0.05;
+  if (Math.random() < zombieChance) {
+    const p = randomSpotInChunk();
+    const h = world.heightAt(p.x, p.z);
+    if (h > 0) spawnMob(MOB_TYPES.ZOMBIE, p.x + 0.5, p.z + 0.5);
+  }
 }
 
-function spawnInitialMobs() {
-  for (let i = 0; i < 6; i++) { const s = findSpawnSpot(); spawnMob(MOB_TYPES.COW, s.x, s.z); }
-  for (let i = 0; i < 4; i++) { const s = findSpawnSpot(); spawnMob(MOB_TYPES.GOAT, s.x, s.z); }
-  for (let i = 0; i < 3; i++) { const s = findSpawnSpot(); spawnMob(MOB_TYPES.ZOMBIE, s.x, s.z); }
+function despawnFarMobs() {
+  for (let i = mobs.length - 1; i >= 0; i--) {
+    const m = mobs[i];
+    const dist = Math.hypot(m.pos.x - player.pos.x, m.pos.z - player.pos.z);
+    if (dist > UNLOAD_DISTANCE * CHUNK_SIZE) {
+      scene.remove(m.group);
+      mobs.splice(i, 1);
+    }
+  }
 }
-spawnInitialMobs();
 
 function punchMob(mob) {
   mob.health -= 4;
@@ -844,6 +1182,9 @@ function punchMob(mob) {
   mob.pos.x += (dx / len) * 0.4;
   mob.pos.z += (dz / len) * 0.4;
   if (mob.health <= 0) {
+    if (mob.type === MOB_TYPES.COW || mob.type === MOB_TYPES.GOAT) {
+      spawnItemDrop(mob.pos.x, mob.pos.y + 0.5, mob.pos.z, ITEM.MEAT);
+    }
     scene.remove(mob.group);
     const idx = mobs.indexOf(mob);
     if (idx !== -1) mobs.splice(idx, 1);
@@ -931,6 +1272,7 @@ function startGame() {
   gameStarted = true;
   overlay.classList.add('hidden');
   domElement.requestPointerLock();
+  if (pendingSave) showToast('Progres dimuat dari save sebelumnya');
 }
 
 startBtn.addEventListener('click', startGame);
@@ -967,17 +1309,21 @@ document.addEventListener('keydown', (e) => {
 document.addEventListener('keyup', (e) => { keys[e.code] = false; });
 
 // ---------- Inventory ----------
-// Counts per block type; the hotbar (slots 1-6) is simply a view onto this.
+// Counts per block/item type; the hotbar (slots 1-6) is a view onto the
+// placeable-block subset of this.
 const inventory = {};
 HOTBAR_BLOCKS.forEach((b) => { inventory[b] = 0; });
+Object.keys(ITEM_META).forEach((id) => { inventory[id] = 0; });
+if (pendingSave && pendingSave.inventory) Object.assign(inventory, pendingSave.inventory);
 
 let selectedBlock = HOTBAR_BLOCKS[0];
 const hotbarEl = document.getElementById('hotbar');
 const inventoryPanel = document.getElementById('inventoryPanel');
 const inventoryGrid = document.getElementById('inventoryGrid');
+const craftingListEl = document.getElementById('craftingList');
 
-function addToInventory(blockType, amount = 1) {
-  inventory[blockType] = (inventory[blockType] || 0) + amount;
+function addToInventory(itemType, amount = 1) {
+  inventory[itemType] = (inventory[itemType] || 0) + amount;
   renderHotbar();
   renderInventoryPanel();
 }
@@ -1013,28 +1359,64 @@ renderHotbar();
 
 function renderInventoryPanel() {
   inventoryGrid.innerHTML = '';
-  HOTBAR_BLOCKS.forEach((blockType) => {
+  const allIds = [...HOTBAR_BLOCKS, ...Object.keys(ITEM_META).map(Number)];
+  allIds.forEach((id) => {
     const slot = document.createElement('div');
     slot.className = 'inv-slot';
     const swatch = document.createElement('div');
     swatch.className = 'swatch';
-    swatch.style.background = '#' + BLOCK_COLORS[blockType].toString(16).padStart(6, '0');
-    if (inventory[blockType] <= 0) swatch.style.opacity = '0.35';
+    const color = BLOCK_COLORS[id] !== undefined ? BLOCK_COLORS[id] : ITEM_META[id].color;
+    swatch.style.background = '#' + color.toString(16).padStart(6, '0');
+    if ((inventory[id] || 0) <= 0) swatch.style.opacity = '0.35';
     slot.appendChild(swatch);
     const count = document.createElement('span');
-    count.textContent = inventory[blockType] > 0 ? inventory[blockType] : '';
+    count.textContent = inventory[id] > 0 ? inventory[id] : '';
     slot.appendChild(count);
+    slot.title = itemLabel(id);
     inventoryGrid.appendChild(slot);
   });
+  renderCrafting();
 }
 renderInventoryPanel();
+
+function craftRecipe(idx) {
+  const recipe = RECIPES[idx];
+  const canCraft = Object.entries(recipe.inputs).every(([id, need]) => (inventory[id] || 0) >= need);
+  if (!canCraft) return;
+  Object.entries(recipe.inputs).forEach(([id, need]) => { inventory[id] -= need; });
+  addToInventory(recipe.output, recipe.outputCount);
+  showToast('Berhasil craft ' + itemLabel(recipe.output));
+}
+
+function renderCrafting() {
+  craftingListEl.innerHTML = '';
+  RECIPES.forEach((recipe, idx) => {
+    const row = document.createElement('div');
+    row.className = 'craft-row';
+    const canCraft = Object.entries(recipe.inputs).every(([id, need]) => (inventory[id] || 0) >= need);
+    const reqText = Object.entries(recipe.inputs).map(([id, need]) => `${itemLabel(id)} x${need}`).join(' + ');
+    const label = document.createElement('span');
+    label.textContent = `${reqText} → ${itemLabel(recipe.output)} x${recipe.outputCount}`;
+    row.appendChild(label);
+    const btn = document.createElement('button');
+    btn.textContent = 'Craft';
+    btn.disabled = !canCraft;
+    btn.addEventListener('click', () => craftRecipe(idx));
+    row.appendChild(btn);
+    craftingListEl.appendChild(row);
+  });
+}
 
 let inventoryOpen = false;
 function toggleInventory() {
   inventoryOpen = !inventoryOpen;
   inventoryPanel.classList.toggle('hidden', !inventoryOpen);
-  if (inventoryOpen && isLocked) document.exitPointerLock();
-  else if (!inventoryOpen) domElement.requestPointerLock();
+  if (inventoryOpen) {
+    renderInventoryPanel();
+    if (isLocked) document.exitPointerLock();
+  } else {
+    domElement.requestPointerLock();
+  }
 }
 
 document.addEventListener('keydown', (e) => {
@@ -1044,6 +1426,8 @@ document.addEventListener('keydown', (e) => {
     renderHotbar();
   }
   if (e.code === 'KeyE' && gameStarted) toggleInventory();
+  if (e.code === 'KeyF' && gameStarted && !inventoryOpen) eatMeat();
+  if (e.code === 'KeyO' && gameStarted) saveGame();
 });
 
 let hotbarIndex = 0;
@@ -1137,6 +1521,14 @@ function stopMining() {
   crackMesh.visible = false;
 }
 
+// Tools (crafted via the recipes above) speed up mining their matching block.
+function getEffectiveHardness(blockType) {
+  let hardness = BLOCK_HARDNESS[blockType] || 0.5;
+  if (blockType === BLOCK.STONE && inventory[ITEM.STONE_PICKAXE] > 0) hardness *= 0.4;
+  if (blockType === BLOCK.WOOD && inventory[ITEM.WOOD_AXE] > 0) hardness *= 0.4;
+  return hardness;
+}
+
 function updateMining(dt) {
   if (!mouseDown0 || !miningTarget) return;
   const blockHit = raycastBlock();
@@ -1145,12 +1537,12 @@ function updateMining(dt) {
     startMiningOrPunch();
     return;
   }
-  const hardness = BLOCK_HARDNESS[miningBlockType] || 0.5;
-  miningProgress += dt / hardness;
+  miningProgress += dt / getEffectiveHardness(miningBlockType);
   if (miningProgress >= 1) {
     world.set(miningTarget.x, miningTarget.y, miningTarget.z, BLOCK.AIR);
+    markPlayerEdit(miningTarget.x, miningTarget.z);
     spawnItemDrop(miningTarget.x + 0.5, miningTarget.y + 0.5, miningTarget.z + 0.5, BLOCK_DROP[miningBlockType]);
-    rebuildMesh();
+    remeshAround(miningTarget.x, miningTarget.z);
     stopMining();
     if (mouseDown0) startMiningOrPunch();
   } else {
@@ -1167,10 +1559,11 @@ function placeBlock() {
     const px = Math.floor(player.pos.x), py0 = Math.floor(player.pos.y - PLAYER_HEIGHT + 0.1), py1 = Math.floor(player.pos.y - 0.1), pz = Math.floor(player.pos.z);
     if ((x === px && z === pz) && (y === py0 || y === py1)) return;
     world.set(x, y, z, selectedBlock);
+    markPlayerEdit(x, z);
     inventory[selectedBlock]--;
     renderHotbar();
     renderInventoryPanel();
-    rebuildMesh();
+    remeshAround(x, z);
   }
 }
 
@@ -1254,19 +1647,34 @@ function updatePhysics(dt) {
 
 // ---------- Main loop ----------
 let lastTime = performance.now();
+let autosaveAccumulator = 0;
 function animate() {
   requestAnimationFrame(animate);
   const now = performance.now();
   const dt = Math.min(0.05, (now - lastTime) / 1000);
   lastTime = now;
 
+  updateDayNightCycle(dt);
+
   if (gameStarted && !inventoryOpen) {
     updatePhysics(dt);
     updateMining(dt);
     updateItemDrops(dt);
     updateMobs(dt);
+    updateHunger(dt);
+    updateChunkStreaming(dt);
+
+    autosaveAccumulator += dt;
+    if (autosaveAccumulator > 30) {
+      autosaveAccumulator = 0;
+      saveGame();
+    }
   }
 
   renderer.render(scene, camera);
 }
 animate();
+
+window.addEventListener('beforeunload', () => {
+  if (gameStarted) saveGame();
+});

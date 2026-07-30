@@ -115,6 +115,83 @@ canvas {
 #health .heart.full { color: #e74c3c; }
 #health .heart.empty { color: #4a2020; }
 
+#hunger {
+  position: fixed;
+  bottom: 76px;
+  left: calc(50% + 130px);
+  transform: translateX(-50%);
+  z-index: 10;
+  display: flex;
+  gap: 3px;
+}
+
+#hunger .drumstick {
+  width: 20px;
+  height: 18px;
+  font-size: 15px;
+  line-height: 18px;
+  text-align: center;
+  filter: drop-shadow(0 0 2px rgba(0,0,0,0.9));
+}
+
+#hunger .drumstick.empty { filter: grayscale(1) drop-shadow(0 0 2px rgba(0,0,0,0.9)); }
+
+#craftingList {
+  margin-top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: rgba(0,0,0,0.4);
+  padding: 10px 14px;
+  border-radius: 8px;
+  max-width: 480px;
+}
+
+.craft-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+}
+
+.craft-row button {
+  padding: 4px 12px;
+  border: none;
+  border-radius: 4px;
+  background: #4CAF50;
+  color: white;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.craft-row button:disabled {
+  background: #555;
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+#toast {
+  position: fixed;
+  top: 60px;
+  left: 50%;
+  transform: translateX(-50%) translateY(-10px);
+  z-index: 200;
+  background: rgba(0,0,0,0.75);
+  color: white;
+  padding: 8px 18px;
+  border-radius: 6px;
+  font-size: 13px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+#toast.visible {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
 #inventoryPanel {
   position: fixed;
   inset: 0;
