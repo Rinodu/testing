@@ -255,15 +255,41 @@ function buildTextureAtlas() {
 }
 
 // Rewrites a BoxGeometry's UVs so every face samples a single atlas cell
-// (used for the small item-drop cubes, which don't need per-face texturing).
-function applyAtlasCellToBox(geometry, cell) {
-  const u0 = cell[0] * CELL_U, v0 = cell[1] * CELL_V;
+// (used for the small item-drop cubes and mob body parts, which don't need
+// per-face texturing). cellW/cellH default to the block atlas's cell
+// fractions but any atlas (e.g. the mob atlas) can pass its own.
+function applyAtlasCellToBox(geometry, cell, cellW = CELL_U, cellH = CELL_V) {
+  const u0 = cell[0] * cellW, v0 = cell[1] * cellH;
   const uvAttr = geometry.getAttribute('uv');
   for (let i = 0; i < uvAttr.count; i++) {
     const lu = uvAttr.getX(i), lv = uvAttr.getY(i);
-    uvAttr.setXY(i, u0 + lu * CELL_U, v0 + lv * CELL_V);
+    uvAttr.setXY(i, u0 + lu * cellW, v0 + lv * cellH);
   }
   uvAttr.needsUpdate = true;
+}
+
+// Generic helpers for painting a procedural pixel-art atlas onto any canvas
+// context (used by both the block atlas and the mob atlas below).
+function noiseFillOn(ctx, x0, y0, w, h, base, variance, seed) {
+  const rnd = seededRandomFn(seed);
+  for (let py = 0; py < h; py++) {
+    for (let px = 0; px < w; px++) {
+      const n = (rnd() - 0.5) * 2 * variance;
+      ctx.fillStyle = `rgb(${clamp255(base[0] + n)},${clamp255(base[1] + n)},${clamp255(base[2] + n)})`;
+      ctx.fillRect(x0 + px, y0 + py, 1, 1);
+    }
+  }
+}
+function blotchesOn(ctx, x0, y0, w, h, seed, count, color) {
+  const rnd = seededRandomFn(seed);
+  for (let i = 0; i < count; i++) {
+    const bx = x0 + rnd() * w, by = y0 + rnd() * h;
+    const r = 1.5 + rnd() * 2.5;
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.ellipse(bx, by, r, r * 0.75, rnd() * Math.PI, 0, Math.PI * 2);
+    ctx.fill();
+  }
 }
 
 // ---------- Simple seeded value noise ----------
@@ -579,7 +605,8 @@ const skyMat = new THREE.ShaderMaterial({
   side: THREE.BackSide,
   depthWrite: false,
 });
-scene.add(new THREE.Mesh(skyGeo, skyMat));
+const skyMesh = new THREE.Mesh(skyGeo, skyMat);
+scene.add(skyMesh);
 
 // Sun & moon glow sprites
 function buildGlowTexture(colorStops) {
@@ -1054,27 +1081,156 @@ const MOB_TYPES = {
   ZOMBIE: 'zombie',
 };
 
-function boxPart(w, h, d, color) {
+// ---------- Procedural mob texture atlas ----------
+// Same technique as the block atlas: original pixel-art painted by code, not
+// a copy of Mojang's actual mob textures (those are copyrighted assets).
+const MOB_ATLAS_COLS = 4;
+const MOB_ATLAS_ROWS = 3;
+const MOB_CELL_PX = 16;
+const MOB_CELL_U = 1 / MOB_ATLAS_COLS;
+const MOB_CELL_V = 1 / MOB_ATLAS_ROWS;
+
+const MOB_TEX_CELL = {
+  COW_BODY: [0, 0], COW_HEAD: [1, 0], COW_LEG: [2, 0], COW_PATCH: [3, 0],
+  GOAT_BODY: [0, 1], GOAT_HEAD: [1, 1], GOAT_HORN: [2, 1], GOAT_LEG: [3, 1],
+  ZOMBIE_BODY: [0, 2], ZOMBIE_HEAD: [1, 2], ZOMBIE_ARM: [2, 2], ZOMBIE_LEG: [3, 2],
+};
+
+function buildMobTextureAtlas() {
+  const canvas = document.createElement('canvas');
+  canvas.width = MOB_ATLAS_COLS * MOB_CELL_PX;
+  canvas.height = MOB_ATLAS_ROWS * MOB_CELL_PX;
+  const ctx = canvas.getContext('2d');
+  ctx.imageSmoothingEnabled = false;
+  const P = MOB_CELL_PX;
+  const origin = (cell) => [cell[0] * P, cell[1] * P];
+
+  function eyeDots(x0, y0) {
+    ctx.fillStyle = '#1a1a1a';
+    ctx.fillRect(x0 + 4, y0 + 6, 2, 2);
+    ctx.fillRect(x0 + 10, y0 + 6, 2, 2);
+  }
+
+  // COW_BODY: white hide with black Holstein-style blotches
+  {
+    const [x0, y0] = origin(MOB_TEX_CELL.COW_BODY);
+    noiseFillOn(ctx, x0, y0, P, P, [238, 238, 235], 8, 2101);
+    blotchesOn(ctx, x0, y0, P, P, 2102, 5, '#2a2622');
+  }
+  // COW_HEAD: brown with a pale snout and eyes
+  {
+    const [x0, y0] = origin(MOB_TEX_CELL.COW_HEAD);
+    noiseFillOn(ctx, x0, y0, P, P, [96, 62, 40], 14, 2103);
+    ctx.fillStyle = '#e7d7c2';
+    ctx.fillRect(x0 + 4, y0 + 10, 8, 5);
+    eyeDots(x0, y0);
+  }
+  // COW_LEG: cream with a dark hoof tip
+  {
+    const [x0, y0] = origin(MOB_TEX_CELL.COW_LEG);
+    noiseFillOn(ctx, x0, y0, P, P, [220, 210, 190], 8, 2104);
+    ctx.fillStyle = '#2a2622';
+    ctx.fillRect(x0, y0 + P - 3, P, 3);
+  }
+  // COW_PATCH: solid dark patch (used for the small spot decal on the body)
+  {
+    const [x0, y0] = origin(MOB_TEX_CELL.COW_PATCH);
+    noiseFillOn(ctx, x0, y0, P, P, [42, 38, 34], 6, 2105);
+  }
+
+  // GOAT_BODY: grey-white fur with fine vertical strokes
+  {
+    const [x0, y0] = origin(MOB_TEX_CELL.GOAT_BODY);
+    noiseFillOn(ctx, x0, y0, P, P, [205, 205, 200], 10, 2201);
+    const rnd = seededRandomFn(2202);
+    ctx.strokeStyle = 'rgba(160,160,155,0.5)';
+    for (let i = 0; i < 14; i++) {
+      const x = x0 + rnd() * P, y = y0 + rnd() * P;
+      ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x, y + 2 + rnd() * 2); ctx.stroke();
+    }
+  }
+  // GOAT_HEAD: cream face with eyes and a dark nose
+  {
+    const [x0, y0] = origin(MOB_TEX_CELL.GOAT_HEAD);
+    noiseFillOn(ctx, x0, y0, P, P, [222, 216, 200], 10, 2203);
+    ctx.fillStyle = '#4a4038';
+    ctx.fillRect(x0 + 6, y0 + 11, 4, 3);
+    eyeDots(x0, y0);
+  }
+  // GOAT_HORN: dark curved-looking gradient
+  {
+    const [x0, y0] = origin(MOB_TEX_CELL.GOAT_HORN);
+    noiseFillOn(ctx, x0, y0, P, P, [58, 54, 50], 10, 2204);
+  }
+  // GOAT_LEG: grey with dark hoof tip
+  {
+    const [x0, y0] = origin(MOB_TEX_CELL.GOAT_LEG);
+    noiseFillOn(ctx, x0, y0, P, P, [170, 170, 165], 8, 2205);
+    ctx.fillStyle = '#3a3632';
+    ctx.fillRect(x0, y0 + P - 3, P, 3);
+  }
+
+  // ZOMBIE_BODY: torn teal shirt over green skin
+  {
+    const [x0, y0] = origin(MOB_TEX_CELL.ZOMBIE_BODY);
+    noiseFillOn(ctx, x0, y0, P, P, [45, 110, 96], 12, 2301);
+    blotchesOn(ctx, x0, y0, P, P, 2302, 4, 'rgba(30,70,60,0.7)');
+  }
+  // ZOMBIE_HEAD: rotten green skin with sunken eyes and a mouth line
+  {
+    const [x0, y0] = origin(MOB_TEX_CELL.ZOMBIE_HEAD);
+    noiseFillOn(ctx, x0, y0, P, P, [84, 138, 72], 14, 2303);
+    ctx.fillStyle = '#111';
+    ctx.fillRect(x0 + 4, y0 + 6, 3, 2);
+    ctx.fillRect(x0 + 10, y0 + 6, 3, 2);
+    ctx.fillStyle = 'rgba(20,20,20,0.7)';
+    ctx.fillRect(x0 + 5, y0 + 11, 6, 1);
+  }
+  // ZOMBIE_ARM: green skin, slightly darker variant
+  {
+    const [x0, y0] = origin(MOB_TEX_CELL.ZOMBIE_ARM);
+    noiseFillOn(ctx, x0, y0, P, P, [76, 128, 66], 14, 2304);
+  }
+  // ZOMBIE_LEG: dark tattered trousers
+  {
+    const [x0, y0] = origin(MOB_TEX_CELL.ZOMBIE_LEG);
+    noiseFillOn(ctx, x0, y0, P, P, [52, 58, 88], 10, 2305);
+  }
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.magFilter = THREE.NearestFilter;
+  texture.minFilter = THREE.NearestFilter;
+  texture.generateMipmaps = false;
+  texture.flipY = false;
+  texture.wrapS = THREE.ClampToEdgeWrapping;
+  texture.wrapT = THREE.ClampToEdgeWrapping;
+  return texture;
+}
+
+const mobAtlasTexture = buildMobTextureAtlas();
+
+function boxPart(w, h, d, cell) {
   const geo = new THREE.BoxGeometry(w, h, d);
-  const mat = new THREE.MeshLambertMaterial({ color });
+  applyAtlasCellToBox(geo, cell, MOB_CELL_U, MOB_CELL_V);
+  const mat = new THREE.MeshLambertMaterial({ map: mobAtlasTexture });
   const mesh = new THREE.Mesh(geo, mat);
   mesh.castShadow = true;
-  mesh.userData.baseColor = mat.color.clone();
+  mesh.userData.baseColor = mat.color.clone(); // white; hurt-flash tints this over the texture
   return mesh;
 }
 
 function createCow() {
   const group = new THREE.Group();
-  const body = boxPart(0.55, 0.5, 0.9, 0xffffff);
+  const body = boxPart(0.55, 0.5, 0.9, MOB_TEX_CELL.COW_BODY);
   body.position.set(0, 0.55, 0);
   group.add(body);
-  const patch = boxPart(0.3, 0.2, 0.4, 0x3a2a20);
+  const patch = boxPart(0.3, 0.2, 0.4, MOB_TEX_CELL.COW_PATCH);
   patch.position.set(0.1, 0.62, 0.15);
   group.add(patch);
-  const head = boxPart(0.35, 0.35, 0.35, 0x3a2a20);
+  const head = boxPart(0.35, 0.35, 0.35, MOB_TEX_CELL.COW_HEAD);
   head.position.set(0, 0.6, 0.6);
   group.add(head);
-  const legGeo = () => boxPart(0.15, 0.45, 0.15, 0x2a1e18);
+  const legGeo = () => boxPart(0.15, 0.45, 0.15, MOB_TEX_CELL.COW_LEG);
   const legOffsets = [[-0.18, 0.22, 0.3], [0.18, 0.22, 0.3], [-0.18, 0.22, -0.3], [0.18, 0.22, -0.3]];
   const legs = legOffsets.map((o) => { const l = legGeo(); l.position.set(...o); group.add(l); return l; });
   return { group, legs, eyeHeight: 0.9, hitRadius: 0.55 };
@@ -1082,16 +1238,16 @@ function createCow() {
 
 function createGoat() {
   const group = new THREE.Group();
-  const body = boxPart(0.4, 0.4, 0.7, 0xcfcfcf);
+  const body = boxPart(0.4, 0.4, 0.7, MOB_TEX_CELL.GOAT_BODY);
   body.position.set(0, 0.45, 0);
   group.add(body);
-  const head = boxPart(0.28, 0.28, 0.28, 0xe8e8e8);
+  const head = boxPart(0.28, 0.28, 0.28, MOB_TEX_CELL.GOAT_HEAD);
   head.position.set(0, 0.55, 0.45);
   group.add(head);
-  const hornGeo = () => boxPart(0.05, 0.15, 0.05, 0x4a4a4a);
+  const hornGeo = () => boxPart(0.05, 0.15, 0.05, MOB_TEX_CELL.GOAT_HORN);
   const hornL = hornGeo(); hornL.position.set(-0.08, 0.72, 0.5); group.add(hornL);
   const hornR = hornGeo(); hornR.position.set(0.08, 0.72, 0.5); group.add(hornR);
-  const legGeo = () => boxPart(0.12, 0.35, 0.12, 0xb5b5b5);
+  const legGeo = () => boxPart(0.12, 0.35, 0.12, MOB_TEX_CELL.GOAT_LEG);
   const legOffsets = [[-0.14, 0.18, 0.22], [0.14, 0.18, 0.22], [-0.14, 0.18, -0.22], [0.14, 0.18, -0.22]];
   const legs = legOffsets.map((o) => { const l = legGeo(); l.position.set(...o); group.add(l); return l; });
   return { group, legs, eyeHeight: 0.75, hitRadius: 0.45 };
@@ -1099,16 +1255,16 @@ function createGoat() {
 
 function createZombie() {
   const group = new THREE.Group();
-  const body = boxPart(0.4, 0.6, 0.25, 0x2f6b3a);
+  const body = boxPart(0.4, 0.6, 0.25, MOB_TEX_CELL.ZOMBIE_BODY);
   body.position.set(0, 0.9, 0);
   group.add(body);
-  const head = boxPart(0.32, 0.32, 0.32, 0x4a8f57);
+  const head = boxPart(0.32, 0.32, 0.32, MOB_TEX_CELL.ZOMBIE_HEAD);
   head.position.set(0, 1.35, 0);
   group.add(head);
-  const armGeo = () => boxPart(0.14, 0.55, 0.14, 0x2f6b3a);
+  const armGeo = () => boxPart(0.14, 0.55, 0.14, MOB_TEX_CELL.ZOMBIE_ARM);
   const armL = armGeo(); armL.position.set(-0.27, 0.9, 0); group.add(armL);
   const armR = armGeo(); armR.position.set(0.27, 0.9, 0); group.add(armR);
-  const legGeo = () => boxPart(0.16, 0.55, 0.16, 0x2b3a6b);
+  const legGeo = () => boxPart(0.16, 0.55, 0.16, MOB_TEX_CELL.ZOMBIE_LEG);
   const legOffsets = [[-0.11, 0.3, 0], [0.11, 0.3, 0]];
   const legs = legOffsets.map((o) => { const l = legGeo(); l.position.set(...o); group.add(l); return l; });
   return { group, legs, eyeHeight: 1.6, hitRadius: 0.5 };
@@ -1682,6 +1838,11 @@ function animate() {
       saveGame();
     }
   }
+
+  // Sky dome is a fixed-radius sphere; it must stay centered on the camera or
+  // it gets left behind once the player wanders far from world origin (the
+  // chunk-streamed world has no real boundary), exposing black void past its edge.
+  skyMesh.position.copy(camera.position);
 
   renderer.render(scene, camera);
 }
