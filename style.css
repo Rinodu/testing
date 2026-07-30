@@ -93,6 +93,85 @@ canvas {
   z-index: -1;
 }
 
+#health {
+  position: fixed;
+  bottom: 76px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10;
+  display: flex;
+  gap: 3px;
+}
+
+#health .heart {
+  width: 20px;
+  height: 18px;
+  font-size: 18px;
+  line-height: 18px;
+  text-align: center;
+  filter: drop-shadow(0 0 2px rgba(0,0,0,0.9));
+}
+
+#health .heart.full { color: #e74c3c; }
+#health .heart.empty { color: #4a2020; }
+
+#inventoryPanel {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: rgba(10, 10, 15, 0.7);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  text-align: center;
+}
+
+#inventoryPanel.hidden {
+  display: none;
+}
+
+#inventoryPanel h2 {
+  margin-bottom: 14px;
+  text-shadow: 2px 2px 4px rgba(0,0,0,0.6);
+}
+
+#inventoryGrid {
+  display: grid;
+  grid-template-columns: repeat(6, 56px);
+  gap: 8px;
+  background: rgba(0,0,0,0.4);
+  padding: 14px;
+  border-radius: 8px;
+}
+
+.inv-slot {
+  width: 56px;
+  height: 56px;
+  border: 2px solid rgba(255,255,255,0.4);
+  border-radius: 4px;
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-end;
+  font-size: 12px;
+  padding: 2px;
+}
+
+.inv-slot .swatch {
+  position: absolute;
+  inset: 5px;
+  border-radius: 2px;
+  z-index: -1;
+}
+
+#inventoryPanel .hint {
+  margin-top: 12px;
+  font-size: 12px;
+  opacity: 0.75;
+}
+
 #info {
   position: fixed;
   top: 10px;
