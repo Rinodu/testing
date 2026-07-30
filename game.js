@@ -542,20 +542,35 @@ camera.position.copy(player.pos);
 // Pointer lock + mouse look
 const domElement = renderer.domElement;
 let isLocked = false;
+// gameStarted controls WASD/jump; it does NOT require pointer lock to
+// succeed, since some browsers/embeds (http, iframes, mobile) block the
+// Pointer Lock API entirely. Without this split, a blocked pointer lock
+// would silently freeze all movement forever.
+let gameStarted = false;
 
 const overlay = document.getElementById('overlay');
 const startBtn = document.getElementById('startBtn');
 
-startBtn.addEventListener('click', () => {
+function startGame() {
+  gameStarted = true;
+  overlay.classList.add('hidden');
   domElement.requestPointerLock();
-});
+}
+
+startBtn.addEventListener('click', startGame);
 domElement.addEventListener('click', () => {
-  if (!isLocked) domElement.requestPointerLock();
+  if (!gameStarted) startGame();
+  else if (!isLocked) domElement.requestPointerLock();
 });
 
 document.addEventListener('pointerlockchange', () => {
   isLocked = document.pointerLockElement === domElement;
-  overlay.classList.toggle('hidden', isLocked);
+});
+
+document.addEventListener('pointerlockerror', () => {
+  // Pointer lock unsupported/blocked in this context: keep the game
+  // playable via keyboard even though mouse-look won't work.
+  isLocked = false;
 });
 
 document.addEventListener('mousemove', (e) => {
@@ -569,7 +584,10 @@ document.addEventListener('mousemove', (e) => {
 
 // Keyboard
 const keys = {};
-document.addEventListener('keydown', (e) => { keys[e.code] = true; });
+document.addEventListener('keydown', (e) => {
+  keys[e.code] = true;
+  if (e.code === 'Space') e.preventDefault();
+});
 document.addEventListener('keyup', (e) => { keys[e.code] = false; });
 
 // Hotbar / selected block
@@ -602,7 +620,7 @@ document.addEventListener('keydown', (e) => {
 
 let hotbarIndex = 0;
 document.addEventListener('wheel', (e) => {
-  if (!isLocked) return;
+  if (!gameStarted) return;
   hotbarIndex = (hotbarIndex + (e.deltaY > 0 ? 1 : -1) + HOTBAR_BLOCKS.length) % HOTBAR_BLOCKS.length;
   selectedBlock = HOTBAR_BLOCKS[hotbarIndex];
   renderHotbar();
@@ -610,7 +628,7 @@ document.addEventListener('wheel', (e) => {
 
 // Mouse buttons: break / place
 domElement.addEventListener('mousedown', (e) => {
-  if (!isLocked) return;
+  if (!gameStarted) return;
   if (e.button === 0) breakBlock();
   else if (e.button === 2) placeBlock();
 });
@@ -741,7 +759,7 @@ function animate() {
   const dt = Math.min(0.05, (now - lastTime) / 1000);
   lastTime = now;
 
-  if (isLocked) {
+  if (gameStarted) {
     updatePhysics(dt);
   }
 
