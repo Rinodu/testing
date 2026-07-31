@@ -10,6 +10,7 @@ const REACH = 6;              // block interaction reach distance
 const GRAVITY = 20;
 const JUMP_SPEED = 8;
 const MOVE_SPEED = 6;
+const SPRINT_MULTIPLIER = 1.6;
 const PLAYER_HEIGHT = 1.7;
 const PLAYER_RADIUS = 0.3;
 const DAY_LENGTH_SECONDS = 600; // one full day/night cycle
@@ -27,6 +28,10 @@ const BLOCK = {
   WOOD: 4,
   LEAVES: 5,
   SAND: 6,
+  COAL_ORE: 7,
+  IRON_ORE: 8,
+  SNOW: 9,
+  WATER: 10,
 };
 
 const BLOCK_NAMES = {
@@ -36,17 +41,24 @@ const BLOCK_NAMES = {
   [BLOCK.WOOD]: 'Kayu',
   [BLOCK.LEAVES]: 'Daun',
   [BLOCK.SAND]: 'Pasir',
+  [BLOCK.COAL_ORE]: 'Bijih Batu Bara',
+  [BLOCK.IRON_ORE]: 'Bijih Besi',
+  [BLOCK.SNOW]: 'Salju',
+  [BLOCK.WATER]: 'Air',
 };
 
-const HOTBAR_BLOCKS = [BLOCK.GRASS, BLOCK.DIRT, BLOCK.STONE, BLOCK.WOOD, BLOCK.LEAVES, BLOCK.SAND];
+const HOTBAR_BLOCKS = [BLOCK.GRASS, BLOCK.DIRT, BLOCK.STONE, BLOCK.WOOD, BLOCK.LEAVES, BLOCK.SAND, BLOCK.SNOW];
 
-// Non-block items (crafted goods / food). IDs are offset well past BLOCK ids
-// so they can share the same `inventory` dictionary without colliding.
+// Non-block items (crafted goods / food / raw ore). IDs are offset well past
+// BLOCK ids so they can share the same `inventory` dictionary without colliding.
 const ITEM = {
   MEAT: 100,
   STICK: 101,
   STONE_PICKAXE: 102,
   WOOD_AXE: 103,
+  COAL: 104,
+  IRON: 105,
+  IRON_PICKAXE: 106,
 };
 
 const ITEM_META = {
@@ -54,6 +66,9 @@ const ITEM_META = {
   [ITEM.STICK]: { label: 'Stick', color: 0xc9a066 },
   [ITEM.STONE_PICKAXE]: { label: 'Pickaxe Batu', color: 0x999999 },
   [ITEM.WOOD_AXE]: { label: 'Kapak Kayu', color: 0x8b5a2b },
+  [ITEM.COAL]: { label: 'Batu Bara', color: 0x2b2b2b },
+  [ITEM.IRON]: { label: 'Besi Mentah', color: 0xd8c8b8 },
+  [ITEM.IRON_PICKAXE]: { label: 'Pickaxe Besi', color: 0xdedede },
 };
 
 function itemLabel(id) {
@@ -65,9 +80,15 @@ const RECIPES = [
   { inputs: { [BLOCK.WOOD]: 1 }, output: ITEM.STICK, outputCount: 4 },
   { inputs: { [BLOCK.STONE]: 3, [ITEM.STICK]: 2 }, output: ITEM.STONE_PICKAXE, outputCount: 1 },
   { inputs: { [BLOCK.WOOD]: 3, [ITEM.STICK]: 2 }, output: ITEM.WOOD_AXE, outputCount: 1 },
+  { inputs: { [ITEM.IRON]: 3, [ITEM.STICK]: 2 }, output: ITEM.IRON_PICKAXE, outputCount: 1 },
 ];
 
-// Seconds needed to fully mine a block (no tool system, so it's a flat value per block type)
+// Blocks that a pickaxe (stone/iron) speeds up mining for; iron ore additionally
+// requires owning at least a stone pickaxe to drop anything, like Minecraft's
+// tool-tier gating.
+const PICKAXE_BLOCKS = new Set([BLOCK.STONE, BLOCK.COAL_ORE, BLOCK.IRON_ORE]);
+
+// Seconds needed to fully mine a block (before tool speed multipliers)
 const BLOCK_HARDNESS = {
   [BLOCK.GRASS]: 0.5,
   [BLOCK.DIRT]: 0.45,
@@ -75,9 +96,13 @@ const BLOCK_HARDNESS = {
   [BLOCK.WOOD]: 0.7,
   [BLOCK.LEAVES]: 0.25,
   [BLOCK.SAND]: 0.4,
+  [BLOCK.COAL_ORE]: 1.4,
+  [BLOCK.IRON_ORE]: 1.8,
+  [BLOCK.SNOW]: 0.35,
 };
 
-// What a block drops when mined (grass drops dirt, like Minecraft)
+// What a block drops when mined (grass drops dirt, like Minecraft). Ores are
+// handled separately in getMiningDrop() since their drop depends on tools.
 const BLOCK_DROP = {
   [BLOCK.GRASS]: BLOCK.DIRT,
   [BLOCK.DIRT]: BLOCK.DIRT,
@@ -85,7 +110,23 @@ const BLOCK_DROP = {
   [BLOCK.WOOD]: BLOCK.WOOD,
   [BLOCK.LEAVES]: BLOCK.LEAVES,
   [BLOCK.SAND]: BLOCK.SAND,
+  [BLOCK.SNOW]: BLOCK.SNOW,
 };
+
+// Ore/tool-aware version of BLOCK_DROP. Returns null when nothing should drop
+// (mining iron ore bare-handed/wood tools, like vanilla Minecraft).
+function getMiningDrop(blockType) {
+  if (blockType === BLOCK.COAL_ORE) return ITEM.COAL;
+  if (blockType === BLOCK.IRON_ORE) {
+    const hasPickaxe = inventory[ITEM.STONE_PICKAXE] > 0 || inventory[ITEM.IRON_PICKAXE] > 0;
+    if (!hasPickaxe) {
+      showToast('Butuh Pickaxe Batu untuk menambang bijih besi!');
+      return null;
+    }
+    return ITEM.IRON;
+  }
+  return BLOCK_DROP[blockType] ?? null;
+}
 
 // ---------- Procedural pixel-art texture atlas ----------
 const ATLAS_COLS = 4;
@@ -101,6 +142,9 @@ const TEX_CELL = {
   WOOD_SIDE: [1, 1],
   LEAVES: [2, 1],
   SAND: [3, 1],
+  COAL_ORE: [0, 2],
+  IRON_ORE: [1, 2],
+  SNOW: [2, 2],
 };
 
 const BLOCK_FACE_CELLS = {
@@ -110,6 +154,9 @@ const BLOCK_FACE_CELLS = {
   [BLOCK.WOOD]: { top: TEX_CELL.WOOD_TOP, bottom: TEX_CELL.WOOD_TOP, side: TEX_CELL.WOOD_SIDE },
   [BLOCK.LEAVES]: { top: TEX_CELL.LEAVES, bottom: TEX_CELL.LEAVES, side: TEX_CELL.LEAVES },
   [BLOCK.SAND]: { top: TEX_CELL.SAND, bottom: TEX_CELL.SAND, side: TEX_CELL.SAND },
+  [BLOCK.COAL_ORE]: { top: TEX_CELL.COAL_ORE, bottom: TEX_CELL.COAL_ORE, side: TEX_CELL.COAL_ORE },
+  [BLOCK.IRON_ORE]: { top: TEX_CELL.IRON_ORE, bottom: TEX_CELL.IRON_ORE, side: TEX_CELL.IRON_ORE },
+  [BLOCK.SNOW]: { top: TEX_CELL.SNOW, bottom: TEX_CELL.DIRT, side: TEX_CELL.SNOW },
 };
 
 function seededRandomFn(seed) {
@@ -244,6 +291,27 @@ function buildTextureAtlas() {
     speckle(x0, y0, 1313, 10, (rnd) => (rnd() < 0.5 ? 'rgba(30,80,30,0.6)' : 'rgba(90,160,70,0.5)'));
   }
 
+  // COAL_ORE: stone base with black coal flecks
+  {
+    const [x0, y0] = cellOrigin(TEX_CELL.COAL_ORE);
+    noiseFill(x0, y0, [130, 130, 130], 16, 1414);
+    speckle(x0, y0, 1415, 16, () => 'rgba(20,20,20,0.9)');
+  }
+
+  // IRON_ORE: stone base with warm tan/orange flecks
+  {
+    const [x0, y0] = cellOrigin(TEX_CELL.IRON_ORE);
+    noiseFill(x0, y0, [130, 130, 130], 16, 1416);
+    speckle(x0, y0, 1417, 14, (rnd) => (rnd() < 0.5 ? 'rgba(200,150,100,0.85)' : 'rgba(180,120,80,0.7)'));
+  }
+
+  // SNOW: bright white with faint blue-grey shading
+  {
+    const [x0, y0] = cellOrigin(TEX_CELL.SNOW);
+    noiseFill(x0, y0, [240, 244, 250], 8, 1418);
+    speckle(x0, y0, 1419, 6, () => 'rgba(200,210,225,0.4)');
+  }
+
   const texture = new THREE.CanvasTexture(canvas);
   texture.magFilter = THREE.NearestFilter;
   texture.minFilter = THREE.NearestFilter;
@@ -336,6 +404,7 @@ function makeNoise2D(seed) {
 }
 
 const noise2D = makeNoise2D(1337);
+const tempNoise2D = makeNoise2D(9911); // separate seed/field so biomes aren't correlated with terrain height
 
 function fractalNoise(x, z, octaves = 4, persistence = 0.5, scale = 0.05) {
   let total = 0, amp = 1, freq = 1, maxAmp = 0;
@@ -347,6 +416,22 @@ function fractalNoise(x, z, octaves = 4, persistence = 0.5, scale = 0.05) {
   }
   return total / maxAmp;
 }
+
+const SEA_LEVEL = 7; // columns whose surface is at/below this get flooded up to here
+
+// Broad, slow-varying temperature field used to pick a simple biome per column.
+function temperatureAt(x, z) {
+  let total = 0, amp = 1, freq = 1, maxAmp = 0;
+  for (let i = 0; i < 3; i++) {
+    total += tempNoise2D(x * 0.008 * freq, z * 0.008 * freq) * amp;
+    maxAmp += amp;
+    amp *= 0.5;
+    freq *= 2;
+  }
+  return total / maxAmp; // roughly -1..1
+}
+const DESERT_THRESHOLD = 0.35;
+const SNOW_THRESHOLD = -0.35;
 
 // ---------- World data (chunk-based, generated on demand around the player) ----------
 class World {
@@ -422,22 +507,39 @@ function generateChunkTerrain(world, chunk) {
     for (let z = z0; z < z0 + CHUNK_SIZE; z++) {
       const n = fractalNoise(x, z);
       const h = Math.max(2, Math.min(world.height - 4, Math.floor(baseHeight + n * 8)));
+      const temp = temperatureAt(x, z);
+      const isDesert = temp > DESERT_THRESHOLD;
+      const isSnowy = temp < SNOW_THRESHOLD;
       for (let y = 0; y <= h; y++) {
         let type;
-        if (y === h) type = h <= baseHeight - 3 ? BLOCK.SAND : BLOCK.GRASS;
-        else if (y >= h - 3) type = BLOCK.DIRT;
-        else type = BLOCK.STONE;
+        if (y === h) {
+          if (h <= SEA_LEVEL || isDesert) type = BLOCK.SAND;
+          else if (isSnowy) type = BLOCK.SNOW;
+          else type = BLOCK.GRASS;
+        } else if (y >= h - 3) {
+          type = isDesert ? BLOCK.SAND : BLOCK.DIRT;
+        } else {
+          // ore pockets: coal fairly common, iron rarer and only deeper down
+          const oreRoll = hash2D(x, z, 5000 + y * 131);
+          if (oreRoll < 0.02) type = BLOCK.COAL_ORE;
+          else if (oreRoll < 0.032 && y < baseHeight - 6) type = BLOCK.IRON_ORE;
+          else type = BLOCK.STONE;
+        }
         world.set(x, y, z, type);
+      }
+      if (h < SEA_LEVEL) {
+        for (let y = h + 1; y <= SEA_LEVEL; y++) world.set(x, y, z, BLOCK.WATER);
       }
     }
   }
   // scatter trees: placement/shape driven entirely by hash2D(x,z,salt) so it's
-  // identical no matter what order chunks happen to load in
+  // identical no matter what order chunks happen to load in. Deserts stay bare.
   const TREE_SEED = 42;
   for (let x = x0; x < x0 + CHUNK_SIZE; x++) {
     for (let z = z0; z < z0 + CHUNK_SIZE; z++) {
       const h = world.heightAt(x, z);
-      if (h > 0 && world.get(x, h, z) === BLOCK.GRASS && hash2D(x, z, TREE_SEED) < 0.01) {
+      const surfaceIsGrassy = world.get(x, h, z) === BLOCK.GRASS || world.get(x, h, z) === BLOCK.SNOW;
+      if (h > 0 && surfaceIsGrassy && temperatureAt(x, z) <= DESERT_THRESHOLD && hash2D(x, z, TREE_SEED) < 0.01) {
         const trunkHeight = 3 + Math.floor(hash2D(x, z, TREE_SEED + 1) * 2);
         for (let t = 1; t <= trunkHeight; t++) world.set(x, h + t, z, BLOCK.WOOD);
         const topY = h + trunkHeight;
@@ -483,6 +585,13 @@ const UV_LOCAL = [[0, 0], [0, 1], [1, 1], [1, 0]];
 const CELL_U = 1 / ATLAS_COLS;
 const CELL_V = 1 / ATLAS_ROWS;
 
+// Air and water are both "see-through" for face culling purposes (a solid
+// block face touching either of them should render), but only air itself
+// gets skipped when iterating blocks to draw.
+function isTransparentBlock(block) {
+  return block === BLOCK.AIR || block === BLOCK.WATER;
+}
+
 // Builds a mesh for a single chunk's blocks (bounded region instead of the
 // whole world), so editing one chunk only ever re-generates that chunk.
 function buildChunkMesh(world, chunk) {
@@ -500,11 +609,13 @@ function buildChunkMesh(world, chunk) {
     for (let z = z0; z < z0 + CHUNK_SIZE; z++) {
       for (let y = 0; y < world.height; y++) {
         const block = world.get(x, y, z);
-        if (block === BLOCK.AIR) continue;
+        // Water is opaque-looking but rendered as its own transparent mesh
+        // (see buildChunkWaterMesh) so it doesn't belong in this solid pass.
+        if (block === BLOCK.AIR || block === BLOCK.WATER) continue;
         const faceCells = BLOCK_FACE_CELLS[block];
         for (const face of FACES) {
           const nx = x + face.dir[0], ny = y + face.dir[1], nz = z + face.dir[2];
-          if (world.get(nx, ny, nz) !== BLOCK.AIR) continue;
+          if (!isTransparentBlock(world.get(nx, ny, nz))) continue;
 
           const cell = faceCells[face.which];
           const u0 = cell[0] * CELL_U, v0 = cell[1] * CELL_V;
@@ -515,9 +626,9 @@ function buildChunkMesh(world, chunk) {
             const tc = corner[face.tangents[1]] === 1 ? 1 : -1;
             const off1 = [0, 0, 0]; off1[face.tangents[0]] = tb;
             const off2 = [0, 0, 0]; off2[face.tangents[1]] = tc;
-            const s1 = world.get(nx + off1[0], ny + off1[1], nz + off1[2]) !== BLOCK.AIR;
-            const s2 = world.get(nx + off2[0], ny + off2[1], nz + off2[2]) !== BLOCK.AIR;
-            const cn = world.get(nx + off1[0] + off2[0], ny + off1[1] + off2[1], nz + off1[2] + off2[2]) !== BLOCK.AIR;
+            const s1 = !isTransparentBlock(world.get(nx + off1[0], ny + off1[1], nz + off1[2]));
+            const s2 = !isTransparentBlock(world.get(nx + off2[0], ny + off2[1], nz + off2[2]));
+            const cn = !isTransparentBlock(world.get(nx + off1[0] + off2[0], ny + off1[1] + off2[1], nz + off1[2] + off2[2]));
             aoValues.push(vertexAOLevel(s1, s2, cn));
           }
 
@@ -555,6 +666,50 @@ function buildChunkMesh(world, chunk) {
   const mesh = new THREE.Mesh(geometry, material);
   mesh.castShadow = true;
   mesh.receiveShadow = true;
+  return mesh;
+}
+
+// Water needs its own transparent, non-shadow-casting mesh (mixing it into
+// the opaque chunk material would make solid blocks transparent too). Only
+// faces touching true air are emitted -- water-to-water and water-to-ground
+// faces are never visible. Returns null when the chunk has no water.
+function buildChunkWaterMesh(world, chunk) {
+  const x0 = chunk.cx * CHUNK_SIZE, z0 = chunk.cz * CHUNK_SIZE;
+  const positions = [];
+  const normals = [];
+  const indices = [];
+  let vertCount = 0;
+
+  for (let x = x0; x < x0 + CHUNK_SIZE; x++) {
+    for (let z = z0; z < z0 + CHUNK_SIZE; z++) {
+      for (let y = 0; y < world.height; y++) {
+        if (world.get(x, y, z) !== BLOCK.WATER) continue;
+        for (const face of FACES) {
+          const nx = x + face.dir[0], ny = y + face.dir[1], nz = z + face.dir[2];
+          if (world.get(nx, ny, nz) !== BLOCK.AIR) continue;
+          const baseVert = vertCount;
+          for (const corner of face.corners) {
+            positions.push(x + corner[0], y + corner[1], z + corner[2]);
+            normals.push(...face.dir);
+          }
+          indices.push(baseVert, baseVert + 1, baseVert + 2, baseVert, baseVert + 2, baseVert + 3);
+          vertCount += 4;
+        }
+      }
+    }
+  }
+
+  if (vertCount === 0) return null;
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
+  geometry.setIndex(indices);
+
+  const material = new THREE.MeshLambertMaterial({
+    color: 0x2a6fd6, transparent: true, opacity: 0.55, side: THREE.DoubleSide, depthWrite: false,
+  });
+  const mesh = new THREE.Mesh(geometry, material);
   return mesh;
 }
 
@@ -767,6 +922,63 @@ function showToast(text) {
   toastTimer = setTimeout(() => el.classList.remove('visible'), 2000);
 }
 
+// ---------- Sound effects (synthesized with Web Audio, no external audio files) ----------
+let audioCtx = null;
+function ensureAudio() {
+  if (!audioCtx) {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (Ctx) audioCtx = new Ctx();
+  }
+  if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+  return audioCtx;
+}
+
+function playTone(freq, duration, type = 'sine', volume = 0.2) {
+  const ctx = ensureAudio();
+  if (!ctx) return;
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  osc.type = type;
+  osc.frequency.value = freq;
+  gain.gain.value = volume;
+  gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + duration);
+  osc.connect(gain);
+  gain.connect(ctx.destination);
+  osc.start();
+  osc.stop(ctx.currentTime + duration);
+}
+
+function playNoiseBurst(duration, volume = 0.15, filterFreq = 2000) {
+  const ctx = ensureAudio();
+  if (!ctx) return;
+  const bufferSize = Math.max(1, Math.floor(ctx.sampleRate * duration));
+  const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+  const data = buffer.getChannelData(0);
+  for (let i = 0; i < bufferSize; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / bufferSize);
+  const src = ctx.createBufferSource();
+  src.buffer = buffer;
+  const filter = ctx.createBiquadFilter();
+  filter.type = 'lowpass';
+  filter.frequency.value = filterFreq;
+  const gain = ctx.createGain();
+  gain.gain.value = volume;
+  src.connect(filter);
+  filter.connect(gain);
+  gain.connect(ctx.destination);
+  src.start();
+}
+
+function playFootstepSound() { playNoiseBurst(0.08, 0.08, 900); }
+function playMineTickSound() { playTone(220, 0.07, 'square', 0.08); }
+function playBlockBreakSound() { playNoiseBurst(0.15, 0.22, 1200); }
+function playPlaceSound() { playTone(300, 0.06, 'square', 0.12); }
+function playPunchSound() { playTone(520, 0.05, 'triangle', 0.15); }
+function playMobDeathSound() { playTone(160, 0.2, 'sawtooth', 0.15); }
+function playHurtSound() { playTone(100, 0.15, 'sawtooth', 0.2); }
+function playEatSound() { playTone(600, 0.1, 'sine', 0.1); }
+function playSplashSound() { playNoiseBurst(0.2, 0.15, 1800); }
+function playJumpSound() { playTone(440, 0.08, 'sine', 0.08); }
+
 // ---------- World init ----------
 const atlasTexture = buildTextureAtlas();
 
@@ -788,7 +1000,8 @@ function getBlockIconURL(blockType) {
 }
 
 const world = new World(WORLD_HEIGHT);
-const chunkMeshes = new Map(); // "cx,cz" -> THREE.Mesh
+const chunkMeshes = new Map(); // "cx,cz" -> THREE.Mesh (opaque blocks)
+const chunkWaterMeshes = new Map(); // "cx,cz" -> THREE.Mesh (transparent water), absent if chunk has none
 
 function remeshChunk(cx, cz) {
   const key = world.chunkKey(cx, cz);
@@ -799,6 +1012,12 @@ function remeshChunk(cx, cz) {
   const mesh = buildChunkMesh(world, chunk);
   scene.add(mesh);
   chunkMeshes.set(key, mesh);
+
+  const oldWater = chunkWaterMeshes.get(key);
+  if (oldWater) { scene.remove(oldWater); oldWater.geometry.dispose(); oldWater.material.dispose(); chunkWaterMeshes.delete(key); }
+  const waterMesh = buildChunkWaterMesh(world, chunk);
+  if (waterMesh) { scene.add(waterMesh); chunkWaterMeshes.set(key, waterMesh); }
+
   chunk.dirty = false;
 }
 
@@ -846,6 +1065,13 @@ function updateChunkStreaming(dt) {
       mesh.geometry.dispose();
       mesh.material.dispose();
       chunkMeshes.delete(key);
+      const waterMesh = chunkWaterMeshes.get(key);
+      if (waterMesh) {
+        scene.remove(waterMesh);
+        waterMesh.geometry.dispose();
+        waterMesh.material.dispose();
+        chunkWaterMeshes.delete(key);
+      }
     }
   }
 
@@ -865,6 +1091,8 @@ const player = {
   onGround: false,
   health: savedPlayer ? savedPlayer.health : MAX_HEALTH,
   hunger: savedPlayer ? savedPlayer.hunger : MAX_HUNGER,
+  sprinting: false,
+  inWater: false,
 };
 if (pendingSave && typeof pendingSave.dayTime === 'number') dayTime = pendingSave.dayTime;
 
@@ -908,6 +1136,7 @@ function damagePlayer(amount) {
   lastDamageTime = now;
   player.health = Math.max(0, player.health - amount);
   renderHealth();
+  playHurtSound();
   if (player.health <= 0) {
     player.pos.set(spawnX + 0.5, world.heightAt(spawnX, spawnZ) + 1 + PLAYER_HEIGHT, spawnZ + 0.5);
     player.vel.set(0, 0, 0);
@@ -921,7 +1150,7 @@ function damagePlayer(amount) {
 let hungerAccumulator = 0;
 let lastStarveDamageTime = -Infinity;
 function updateHunger(dt) {
-  hungerAccumulator += dt;
+  hungerAccumulator += player.sprinting ? dt * 2.5 : dt; // sprinting burns hunger faster
   if (hungerAccumulator >= HUNGER_DRAIN_INTERVAL) {
     hungerAccumulator = 0;
     if (player.hunger > 0) {
@@ -947,6 +1176,7 @@ function eatMeat() {
     player.hunger = Math.min(MAX_HUNGER, player.hunger + 4);
     renderHunger();
     renderInventoryPanel();
+    playEatSound();
     showToast('Makan daging (+4 hunger)');
   }
 }
@@ -1071,6 +1301,7 @@ function updateCrackMesh() {
     crackMesh.material.map = crackTextures[stage];
     crackMesh.material.needsUpdate = true;
     lastCrackStage = stage;
+    playMineTickSound();
   }
 }
 
@@ -1342,6 +1573,7 @@ function despawnFarMobs() {
 function punchMob(mob) {
   mob.health -= 4;
   mob.hurtFlashTimer = 0.15;
+  playPunchSound();
   const dx = mob.pos.x - player.pos.x, dz = mob.pos.z - player.pos.z;
   const len = Math.hypot(dx, dz) || 1;
   mob.pos.x += (dx / len) * 0.4;
@@ -1350,6 +1582,7 @@ function punchMob(mob) {
     if (mob.type === MOB_TYPES.COW || mob.type === MOB_TYPES.GOAT) {
       spawnItemDrop(mob.pos.x, mob.pos.y + 0.5, mob.pos.z, ITEM.MEAT);
     }
+    playMobDeathSound();
     scene.remove(mob.group);
     const idx = mobs.indexOf(mob);
     if (idx !== -1) mobs.splice(idx, 1);
@@ -1437,6 +1670,7 @@ function startGame() {
   gameStarted = true;
   overlay.classList.add('hidden');
   domElement.requestPointerLock();
+  ensureAudio(); // browsers require a user gesture before audio can play
   if (pendingSave) showToast('Progres dimuat dari save sebelumnya');
 }
 
@@ -1692,7 +1926,10 @@ function stopMining() {
 // Tools (crafted via the recipes above) speed up mining their matching block.
 function getEffectiveHardness(blockType) {
   let hardness = BLOCK_HARDNESS[blockType] || 0.5;
-  if (blockType === BLOCK.STONE && inventory[ITEM.STONE_PICKAXE] > 0) hardness *= 0.4;
+  if (PICKAXE_BLOCKS.has(blockType)) {
+    if (inventory[ITEM.IRON_PICKAXE] > 0) hardness *= 0.22;
+    else if (inventory[ITEM.STONE_PICKAXE] > 0) hardness *= 0.4;
+  }
   if (blockType === BLOCK.WOOD && inventory[ITEM.WOOD_AXE] > 0) hardness *= 0.4;
   return hardness;
 }
@@ -1707,9 +1944,11 @@ function updateMining(dt) {
   }
   miningProgress += dt / getEffectiveHardness(miningBlockType);
   if (miningProgress >= 1) {
+    const drop = getMiningDrop(miningBlockType);
     world.set(miningTarget.x, miningTarget.y, miningTarget.z, BLOCK.AIR);
     markPlayerEdit(miningTarget.x, miningTarget.z);
-    spawnItemDrop(miningTarget.x + 0.5, miningTarget.y + 0.5, miningTarget.z + 0.5, BLOCK_DROP[miningBlockType]);
+    if (drop !== null) spawnItemDrop(miningTarget.x + 0.5, miningTarget.y + 0.5, miningTarget.z + 0.5, drop);
+    playBlockBreakSound();
     remeshAround(miningTarget.x, miningTarget.z);
     stopMining();
     if (mouseDown0) startMiningOrPunch();
@@ -1732,12 +1971,14 @@ function placeBlock() {
     renderHotbar();
     renderInventoryPanel();
     remeshAround(x, z);
+    playPlaceSound();
   }
 }
 
 // ---------- Physics / collision ----------
 function isSolid(x, y, z) {
-  return world.get(Math.floor(x), Math.floor(y), Math.floor(z)) !== BLOCK.AIR;
+  const block = world.get(Math.floor(x), Math.floor(y), Math.floor(z));
+  return block !== BLOCK.AIR && block !== BLOCK.WATER;
 }
 
 function collidesAt(pos) {
@@ -1755,6 +1996,7 @@ function collidesAt(pos) {
   return false;
 }
 
+let footstepAccumulator = 0;
 function updatePhysics(dt) {
   const forward = new THREE.Vector3(Math.sin(player.yaw), 0, Math.cos(player.yaw));
   const right = new THREE.Vector3(Math.sin(player.yaw + Math.PI / 2), 0, Math.cos(player.yaw + Math.PI / 2));
@@ -1768,16 +2010,31 @@ function updatePhysics(dt) {
   const len = Math.hypot(moveX, moveZ);
   if (len > 0) { moveX /= len; moveZ /= len; }
 
-  player.vel.x = moveX * MOVE_SPEED;
-  player.vel.z = moveZ * MOVE_SPEED;
+  const feetInWater = world.get(Math.floor(player.pos.x), Math.floor(player.pos.y - 0.3), Math.floor(player.pos.z)) === BLOCK.WATER;
+  if (feetInWater && !player.inWater) playSplashSound();
+  player.inWater = feetInWater;
 
-  if (keys['Space'] && player.onGround) {
-    player.vel.y = JUMP_SPEED;
-    player.onGround = false;
+  const wantsSprint = (keys['ShiftLeft'] || keys['ShiftRight']) && (moveX || moveZ) && player.hunger > 0;
+  player.sprinting = wantsSprint && !feetInWater;
+  const speedMul = feetInWater ? 0.6 : (player.sprinting ? SPRINT_MULTIPLIER : 1);
+
+  player.vel.x = moveX * MOVE_SPEED * speedMul;
+  player.vel.z = moveZ * MOVE_SPEED * speedMul;
+
+  if (keys['Space']) {
+    if (player.onGround) {
+      player.vel.y = JUMP_SPEED;
+      player.onGround = false;
+      playJumpSound();
+    } else if (feetInWater) {
+      player.vel.y = Math.min(player.vel.y + 14 * dt, 3.2); // gentle swim-up while holding space
+    }
   }
 
-  player.vel.y -= GRAVITY * dt;
-  if (player.vel.y < -30) player.vel.y = -30;
+  const gravityNow = feetInWater ? GRAVITY * 0.25 : GRAVITY;
+  player.vel.y -= gravityNow * dt;
+  if (feetInWater) { if (player.vel.y < -2.5) player.vel.y = -2.5; }
+  else if (player.vel.y < -30) player.vel.y = -30;
 
   // move + collide per axis
   const next = player.pos.clone();
@@ -1811,6 +2068,16 @@ function updatePhysics(dt) {
   camera.rotation.order = 'YXZ';
   camera.rotation.y = player.yaw;
   camera.rotation.x = player.pitch;
+
+  if (player.onGround && (moveX || moveZ)) {
+    footstepAccumulator += dt * (player.sprinting ? 1.5 : 1);
+    if (footstepAccumulator > 0.35) {
+      footstepAccumulator = 0;
+      playFootstepSound();
+    }
+  } else {
+    footstepAccumulator = 0.2; // next step plays almost immediately once moving resumes
+  }
 }
 
 // ---------- Main loop ----------
