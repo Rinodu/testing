@@ -879,16 +879,24 @@ scene.add(hemiLight);
 const ambientLight = new THREE.AmbientLight(0xffffff, 0.15);
 scene.add(ambientLight);
 
+// The sun orbits at this distance from whatever it's targeting (see
+// updateDayNightCycle) -- shared here so the shadow camera's near/far can be
+// sized to actually bracket it (previously near=1/far=220 while the light
+// sat ~300-313 units out, so the whole world was outside the shadow
+// camera's depth range and no shadows rendered at all, ever).
+const SUN_DISTANCE = 300;
+
 const sunLight = new THREE.DirectionalLight(0xfff3d6, 1.05);
 sunLight.castShadow = true;
 sunLight.shadow.mapSize.set(2048, 2048);
-sunLight.shadow.camera.left = -60;
-sunLight.shadow.camera.right = 60;
-sunLight.shadow.camera.top = 60;
-sunLight.shadow.camera.bottom = -60;
-sunLight.shadow.camera.near = 1;
-sunLight.shadow.camera.far = 220;
+sunLight.shadow.camera.left = -70;
+sunLight.shadow.camera.right = 70;
+sunLight.shadow.camera.top = 70;
+sunLight.shadow.camera.bottom = -70;
+sunLight.shadow.camera.near = SUN_DISTANCE - 80;
+sunLight.shadow.camera.far = SUN_DISTANCE + 120;
 sunLight.shadow.bias = -0.0015;
+sunLight.shadow.camera.updateProjectionMatrix();
 scene.add(sunLight);
 
 const sunTarget = new THREE.Object3D();
@@ -915,10 +923,10 @@ function updateDayNightCycle(dt) {
   const daylight = Math.max(0, sunHeight); // 0 at night, 1 at noon
   isNight = sunHeight < 0.05;
 
-  const R = 300;
+  const R = SUN_DISTANCE;
   sunLight.position.set(Math.cos(angle) * R, sunHeight * R, Math.sin(angle) * 0.3 * R + player.pos.z);
   sunTarget.position.set(player.pos.x, 0, player.pos.z);
-  sunSprite.position.copy(sunLight.position).add(new THREE.Vector3(0, 0, 0));
+  sunSprite.position.copy(sunLight.position);
   moonSprite.position.set(-sunLight.position.x, -sunHeight * R, -sunLight.position.z + player.pos.z * 2);
   sunSprite.visible = sunHeight > -0.05;
   moonSprite.visible = sunHeight < 0.15;
