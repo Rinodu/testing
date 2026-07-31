@@ -530,6 +530,7 @@ class World {
                                     // generation (e.g. tree leaves) can't recurse forever
       generateChunkTerrain(this, chunk);
       applySavedChunkOverride(chunk);
+      applyStoredNetworkEditsToChunk(chunk);
     }
     return chunk;
   }
@@ -567,11 +568,13 @@ class World {
 }
 
 // Called by the player-facing edit functions (mining/placing) so those edits
-// get flagged for save/load, separately from the one-time procedural fill.
-function markPlayerEdit(x, z) {
+// get flagged for save/load (single-player) and broadcast to the shared
+// world (multiplayer), separately from the one-time procedural fill.
+function markPlayerEdit(x, y, z, block) {
   const cx = Math.floor(x / CHUNK_SIZE), cz = Math.floor(z / CHUNK_SIZE);
   const chunk = world.getChunkIfLoaded(cx, cz);
   if (chunk) chunk.modified = true;
+  if (multiplayerEnabled) sendBlockUpdate(x, y, z, block);
 }
 
 function generateChunkTerrain(world, chunk) {
@@ -934,6 +937,132 @@ function updateDayNightCycle(dt) {
   scene.fog.color.copy(skyMat.uniforms.bottomColor.value);
 }
 
+// ---------- Multiplayer (optional shared-world sync via a small WebSocket relay) ----------
+// Empty by default = solo/offline mode, unchanged from before. Set this to a
+// deployed relay's wss:// URL (see server/README.md) so everyone who opens
+// the same deployed page joins one shared world, or override per-session
+// with ?server=wss://... in the page URL without touching this file.
+const MULTIPLAYER_SERVER_URL = '';
+
+const mpUrlParams = new URLSearchParams(window.location.search);
+const multiplayerUrl = mpUrlParams.get('server') || MULTIPLAYER_SERVER_URL;
+const multiplayerEnabled = !!multiplayerUrl;
+
+let mpSocket = null;
+let mpPlayerId = null;
+// "x,y,z" -> block type, mirrors the server's authoritative shared-world
+// edits so newly-generated chunks can apply them (see applyStoredNetworkEditsToChunk).
+const networkEdits = new Map();
+const remotePlayers = new Map(); // id -> { group, targetPos, targetYaw }
+
+function applyStoredNetworkEditsToChunk(chunk) {
+  if (!multiplayerEnabled || networkEdits.size === 0) return;
+  const x0 = chunk.cx * CHUNK_SIZE, z0 = chunk.cz * CHUNK_SIZE;
+  for (const [key, block] of networkEdits) {
+    const [x, y, z] = key.split(',').map(Number);
+    if (x >= x0 && x < x0 + CHUNK_SIZE && z >= z0 && z < z0 + CHUNK_SIZE) {
+      chunk.data[world.localIndex(x - x0, y, z - z0)] = block;
+    }
+  }
+}
+
+// Applies one shared-world edit: records it (so future chunk generation
+// picks it up) and patches it into the chunk immediately if already loaded
+// (so it doesn't need to wait for that chunk to regenerate).
+function applyNetworkEdit(x, y, z, block) {
+  networkEdits.set(`${x},${y},${z}`, block);
+  const cx = Math.floor(x / CHUNK_SIZE), cz = Math.floor(z / CHUNK_SIZE);
+  const chunk = world.getChunkIfLoaded(cx, cz);
+  if (chunk) {
+    chunk.data[world.localIndex(x - cx * CHUNK_SIZE, y, z - cz * CHUNK_SIZE)] = block;
+    chunk.dirty = true;
+  }
+}
+
+function createRemotePlayerAvatar() {
+  const group = new THREE.Group();
+  function box(w, h, d, color, y) {
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), new THREE.MeshLambertMaterial({ color }));
+    mesh.position.y = y;
+    mesh.castShadow = true;
+    group.add(mesh);
+  }
+  box(0.4, 0.6, 0.25, 0x3465a4, 0.9); // shirt
+  box(0.32, 0.32, 0.32, 0xe8b98c, 1.35); // head
+  box(0.16, 0.55, 0.16, 0x2b2b2b, 0.3); // legs
+  scene.add(group);
+  return group;
+}
+
+function handleServerMessage(msg) {
+  if (msg.type === 'welcome') {
+    mpPlayerId = msg.id;
+    dayTime = msg.dayTime;
+    for (const e of msg.edits) applyNetworkEdit(e.x, e.y, e.z, e.block);
+    for (const p of msg.players) {
+      const group = createRemotePlayerAvatar();
+      remotePlayers.set(p.id, { group, targetPos: new THREE.Vector3(p.x, p.y, p.z), targetYaw: p.yaw });
+    }
+    showToast(`Terhubung ke dunia bersama (${msg.players.length + 1} pemain online)`);
+  } else if (msg.type === 'playerJoined') {
+    if (msg.id === mpPlayerId || remotePlayers.has(msg.id)) return;
+    const group = createRemotePlayerAvatar();
+    remotePlayers.set(msg.id, { group, targetPos: new THREE.Vector3(msg.x, msg.y, msg.z), targetYaw: msg.yaw });
+    showToast('Pemain baru bergabung');
+  } else if (msg.type === 'playerLeft') {
+    const rp = remotePlayers.get(msg.id);
+    if (rp) { scene.remove(rp.group); remotePlayers.delete(msg.id); }
+  } else if (msg.type === 'playerMove') {
+    const rp = remotePlayers.get(msg.id);
+    if (rp) { rp.targetPos.set(msg.x, msg.y, msg.z); rp.targetYaw = msg.yaw; }
+  } else if (msg.type === 'block') {
+    applyNetworkEdit(msg.x, msg.y, msg.z, msg.block);
+    remeshAround(msg.x, msg.z);
+  } else if (msg.type === 'time') {
+    dayTime = msg.dayTime;
+  }
+}
+
+function connectMultiplayer() {
+  if (!multiplayerEnabled) return;
+  try {
+    mpSocket = new WebSocket(multiplayerUrl);
+  } catch (e) {
+    showToast('Gagal konek ke server multiplayer');
+    return;
+  }
+  mpSocket.addEventListener('open', () => showToast('Menghubungkan ke dunia bersama...'));
+  mpSocket.addEventListener('message', (e) => {
+    try { handleServerMessage(JSON.parse(e.data)); } catch (err) { /* ignore malformed messages */ }
+  });
+  mpSocket.addEventListener('close', () => showToast('Koneksi multiplayer terputus'));
+  mpSocket.addEventListener('error', () => {});
+}
+
+function sendBlockUpdate(x, y, z, block) {
+  if (mpSocket && mpSocket.readyState === WebSocket.OPEN) {
+    mpSocket.send(JSON.stringify({ type: 'block', x, y, z, block }));
+  }
+}
+
+let mpLastMoveSent = 0;
+function updateMultiplayer(dt) {
+  if (!multiplayerEnabled) return;
+
+  // throttle outgoing position updates to ~10/sec instead of every frame
+  mpLastMoveSent += dt;
+  if (mpLastMoveSent > 0.1 && mpSocket && mpSocket.readyState === WebSocket.OPEN) {
+    mpLastMoveSent = 0;
+    mpSocket.send(JSON.stringify({ type: 'move', x: player.pos.x, y: player.pos.y, z: player.pos.z, yaw: player.yaw, pitch: player.pitch }));
+  }
+
+  // smoothly interpolate other players toward their last reported position
+  for (const rp of remotePlayers.values()) {
+    rp.group.position.lerp(new THREE.Vector3(rp.targetPos.x, rp.targetPos.y - PLAYER_HEIGHT, rp.targetPos.z), 0.25);
+    rp.group.rotation.y += (rp.targetYaw - rp.group.rotation.y) * 0.25;
+  }
+}
+
 // ---------- Save / Load (localStorage; chunks store only player-modified data,
 // unmodified terrain is always regenerated deterministically from the seed) ----------
 let pendingSave = null;
@@ -957,6 +1086,7 @@ function deserializeChunkData(str) {
 // Applied right after a chunk's procedural terrain is generated, so any saved
 // player edits for that chunk overwrite the freshly-generated base data.
 function applySavedChunkOverride(chunk) {
+  if (multiplayerEnabled) return; // network edits are authoritative for blocks in multiplayer
   if (!pendingSave || !pendingSave.chunks) return;
   const found = pendingSave.chunks.find((c) => c.cx === chunk.cx && c.cz === chunk.cz);
   if (found) {
@@ -966,9 +1096,13 @@ function applySavedChunkOverride(chunk) {
 }
 
 function saveGame() {
+  // In multiplayer the server is authoritative for blocks, so only this
+  // player's own stats/inventory get saved locally -- not the shared world.
   const modifiedChunks = [];
-  for (const chunk of world.chunks.values()) {
-    if (chunk.modified) modifiedChunks.push({ cx: chunk.cx, cz: chunk.cz, data: serializeChunkData(chunk.data) });
+  if (!multiplayerEnabled) {
+    for (const chunk of world.chunks.values()) {
+      if (chunk.modified) modifiedChunks.push({ cx: chunk.cx, cz: chunk.cz, data: serializeChunkData(chunk.data) });
+    }
   }
   const save = {
     version: 1,
@@ -1855,7 +1989,8 @@ function startGame() {
   overlay.classList.add('hidden');
   if (!isMobile) domElement.requestPointerLock(); // pointer lock is a desktop-only concept
   ensureAudio(); // browsers require a user gesture before audio can play
-  if (pendingSave) showToast('Progres dimuat dari save sebelumnya');
+  if (multiplayerEnabled) connectMultiplayer();
+  else if (pendingSave) showToast('Progres dimuat dari save sebelumnya');
 }
 
 startBtn.addEventListener('click', startGame);
@@ -2130,7 +2265,7 @@ function updateMining(dt) {
   if (miningProgress >= 1) {
     const drop = getMiningDrop(miningBlockType);
     world.set(miningTarget.x, miningTarget.y, miningTarget.z, BLOCK.AIR);
-    markPlayerEdit(miningTarget.x, miningTarget.z);
+    markPlayerEdit(miningTarget.x, miningTarget.y, miningTarget.z, BLOCK.AIR);
     if (drop !== null) spawnItemDrop(miningTarget.x + 0.5, miningTarget.y + 0.5, miningTarget.z + 0.5, drop);
     playBlockBreakSound();
     remeshAround(miningTarget.x, miningTarget.z);
@@ -2150,7 +2285,7 @@ function placeBlock() {
     const px = Math.floor(player.pos.x), py0 = Math.floor(player.pos.y - PLAYER_HEIGHT + 0.1), py1 = Math.floor(player.pos.y - 0.1), pz = Math.floor(player.pos.z);
     if ((x === px && z === pz) && (y === py0 || y === py1)) return;
     world.set(x, y, z, selectedBlock);
-    markPlayerEdit(x, z);
+    markPlayerEdit(x, y, z, selectedBlock);
     inventory[selectedBlock]--;
     renderHotbar();
     renderInventoryPanel();
@@ -2426,6 +2561,7 @@ function animate() {
     updateMobs(dt);
     updateHunger(dt);
     updateChunkStreaming(dt);
+    updateMultiplayer(dt);
 
     autosaveAccumulator += dt;
     if (autosaveAccumulator > 30) {
