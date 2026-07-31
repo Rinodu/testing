@@ -32,6 +32,7 @@ const BLOCK = {
   IRON_ORE: 8,
   SNOW: 9,
   WATER: 10,
+  TORCH: 11,
 };
 
 const BLOCK_NAMES = {
@@ -45,9 +46,10 @@ const BLOCK_NAMES = {
   [BLOCK.IRON_ORE]: 'Bijih Besi',
   [BLOCK.SNOW]: 'Salju',
   [BLOCK.WATER]: 'Air',
+  [BLOCK.TORCH]: 'Obor',
 };
 
-const HOTBAR_BLOCKS = [BLOCK.GRASS, BLOCK.DIRT, BLOCK.STONE, BLOCK.WOOD, BLOCK.LEAVES, BLOCK.SAND, BLOCK.SNOW];
+const HOTBAR_BLOCKS = [BLOCK.GRASS, BLOCK.DIRT, BLOCK.STONE, BLOCK.WOOD, BLOCK.LEAVES, BLOCK.SAND, BLOCK.SNOW, BLOCK.TORCH];
 
 // Non-block items (crafted goods / food / raw ore). IDs are offset well past
 // BLOCK ids so they can share the same `inventory` dictionary without colliding.
@@ -81,6 +83,7 @@ const RECIPES = [
   { inputs: { [BLOCK.STONE]: 3, [ITEM.STICK]: 2 }, output: ITEM.STONE_PICKAXE, outputCount: 1 },
   { inputs: { [BLOCK.WOOD]: 3, [ITEM.STICK]: 2 }, output: ITEM.WOOD_AXE, outputCount: 1 },
   { inputs: { [ITEM.IRON]: 3, [ITEM.STICK]: 2 }, output: ITEM.IRON_PICKAXE, outputCount: 1 },
+  { inputs: { [ITEM.COAL]: 1, [ITEM.STICK]: 1 }, output: BLOCK.TORCH, outputCount: 4 },
 ];
 
 // Blocks that a pickaxe (stone/iron) speeds up mining for; iron ore additionally
@@ -99,6 +102,7 @@ const BLOCK_HARDNESS = {
   [BLOCK.COAL_ORE]: 1.4,
   [BLOCK.IRON_ORE]: 1.8,
   [BLOCK.SNOW]: 0.35,
+  [BLOCK.TORCH]: 0.1,
 };
 
 // What a block drops when mined (grass drops dirt, like Minecraft). Ores are
@@ -111,6 +115,7 @@ const BLOCK_DROP = {
   [BLOCK.LEAVES]: BLOCK.LEAVES,
   [BLOCK.SAND]: BLOCK.SAND,
   [BLOCK.SNOW]: BLOCK.SNOW,
+  [BLOCK.TORCH]: BLOCK.TORCH,
 };
 
 // Ore/tool-aware version of BLOCK_DROP. Returns null when nothing should drop
@@ -145,6 +150,7 @@ const TEX_CELL = {
   COAL_ORE: [0, 2],
   IRON_ORE: [1, 2],
   SNOW: [2, 2],
+  TORCH: [3, 2],
 };
 
 const BLOCK_FACE_CELLS = {
@@ -157,6 +163,9 @@ const BLOCK_FACE_CELLS = {
   [BLOCK.COAL_ORE]: { top: TEX_CELL.COAL_ORE, bottom: TEX_CELL.COAL_ORE, side: TEX_CELL.COAL_ORE },
   [BLOCK.IRON_ORE]: { top: TEX_CELL.IRON_ORE, bottom: TEX_CELL.IRON_ORE, side: TEX_CELL.IRON_ORE },
   [BLOCK.SNOW]: { top: TEX_CELL.SNOW, bottom: TEX_CELL.DIRT, side: TEX_CELL.SNOW },
+  // Torch isn't a real cube in the world (see buildChunkMesh/isTransparentBlock),
+  // this entry only exists so its hotbar icon and dropped-item cube can use the atlas.
+  [BLOCK.TORCH]: { top: TEX_CELL.TORCH, bottom: TEX_CELL.TORCH, side: TEX_CELL.TORCH },
 };
 
 function seededRandomFn(seed) {
@@ -312,6 +321,20 @@ function buildTextureAtlas() {
     speckle(x0, y0, 1419, 6, () => 'rgba(200,210,225,0.4)');
   }
 
+  // TORCH: brown handle with an orange/yellow flame tip (only used for the
+  // hotbar icon and dropped-item cube -- the in-world torch is its own mesh)
+  {
+    const [x0, y0] = cellOrigin(TEX_CELL.TORCH);
+    ctx.fillStyle = 'rgba(0,0,0,0)';
+    ctx.clearRect(x0, y0, CELL_PX, CELL_PX);
+    ctx.fillStyle = '#6b4423';
+    ctx.fillRect(x0 + 6, y0 + 6, 4, 10);
+    ctx.fillStyle = '#ffcc44';
+    ctx.fillRect(x0 + 5, y0 + 2, 6, 5);
+    ctx.fillStyle = '#ff9922';
+    ctx.fillRect(x0 + 6, y0 + 3, 4, 3);
+  }
+
   const texture = new THREE.CanvasTexture(canvas);
   texture.magFilter = THREE.NearestFilter;
   texture.minFilter = THREE.NearestFilter;
@@ -403,8 +426,59 @@ function makeNoise2D(seed) {
   };
 }
 
+// 3D Perlin noise (classic Ken Perlin permutation-table form), used to carve
+// underground caves -- a 2D field can't describe tunnels that wind through Y.
+function makeNoise3D(seed) {
+  const perm = new Uint8Array(256);
+  let s = seed >>> 0;
+  function rand() {
+    s ^= s << 13; s ^= s >>> 17; s ^= s << 5;
+    s >>>= 0;
+    return s / 4294967295;
+  }
+  for (let i = 0; i < 256; i++) perm[i] = i;
+  for (let i = 255; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    [perm[i], perm[j]] = [perm[j], perm[i]];
+  }
+  const p = new Uint8Array(512);
+  for (let i = 0; i < 512; i++) p[i] = perm[i & 255];
+
+  function fade(t) { return t * t * t * (t * (t * 6 - 15) + 10); }
+  function lerp(a, b, t) { return a + t * (b - a); }
+  function grad(hash, x, y, z) {
+    const h = hash & 15;
+    const u = h < 8 ? x : y;
+    const v = h < 4 ? y : (h === 12 || h === 14 ? x : z);
+    return ((h & 1) === 0 ? u : -u) + ((h & 2) === 0 ? v : -v);
+  }
+
+  return function noise3D(x, y, z) {
+    const X = Math.floor(x) & 255, Y = Math.floor(y) & 255, Z = Math.floor(z) & 255;
+    x -= Math.floor(x); y -= Math.floor(y); z -= Math.floor(z);
+    const u = fade(x), v = fade(y), w = fade(z);
+    const A = p[X] + Y, AA = p[A] + Z, AB = p[A + 1] + Z;
+    const B = p[X + 1] + Y, BA = p[B] + Z, BB = p[B + 1] + Z;
+    return lerp(
+      lerp(
+        lerp(grad(p[AA], x, y, z), grad(p[BA], x - 1, y, z), u),
+        lerp(grad(p[AB], x, y - 1, z), grad(p[BB], x - 1, y - 1, z), u),
+        v
+      ),
+      lerp(
+        lerp(grad(p[AA + 1], x, y, z - 1), grad(p[BA + 1], x - 1, y, z - 1), u),
+        lerp(grad(p[AB + 1], x, y - 1, z - 1), grad(p[BB + 1], x - 1, y - 1, z - 1), u),
+        v
+      ),
+      w
+    );
+  };
+}
+
 const noise2D = makeNoise2D(1337);
 const tempNoise2D = makeNoise2D(9911); // separate seed/field so biomes aren't correlated with terrain height
+const caveNoise3D = makeNoise3D(4242);
+const CAVE_THRESHOLD = 0.62; // higher = rarer/smaller caves
 
 function fractalNoise(x, z, octaves = 4, persistence = 0.5, scale = 0.05) {
   let total = 0, amp = 1, freq = 1, maxAmp = 0;
@@ -511,6 +585,12 @@ function generateChunkTerrain(world, chunk) {
       const isDesert = temp > DESERT_THRESHOLD;
       const isSnowy = temp < SNOW_THRESHOLD;
       for (let y = 0; y <= h; y++) {
+        // Caves: only carve deep stone (never the surface/dirt crust, and
+        // never y<=1 so there's always a solid floor under the world).
+        if (y > 1 && y < h - 3 && caveNoise3D(x * 0.09, y * 0.12, z * 0.09) > CAVE_THRESHOLD) {
+          world.set(x, y, z, BLOCK.AIR);
+          continue;
+        }
         let type;
         if (y === h) {
           if (h <= SEA_LEVEL || isDesert) type = BLOCK.SAND;
@@ -589,7 +669,7 @@ const CELL_V = 1 / ATLAS_ROWS;
 // block face touching either of them should render), but only air itself
 // gets skipped when iterating blocks to draw.
 function isTransparentBlock(block) {
-  return block === BLOCK.AIR || block === BLOCK.WATER;
+  return block === BLOCK.AIR || block === BLOCK.WATER || block === BLOCK.TORCH;
 }
 
 // Builds a mesh for a single chunk's blocks (bounded region instead of the
@@ -610,8 +690,10 @@ function buildChunkMesh(world, chunk) {
       for (let y = 0; y < world.height; y++) {
         const block = world.get(x, y, z);
         // Water is opaque-looking but rendered as its own transparent mesh
-        // (see buildChunkWaterMesh) so it doesn't belong in this solid pass.
-        if (block === BLOCK.AIR || block === BLOCK.WATER) continue;
+        // (see buildChunkWaterMesh), and torches are their own small
+        // mesh+light entity (see syncTorchesForChunk) -- neither belongs
+        // in this per-chunk solid-cube pass.
+        if (block === BLOCK.AIR || block === BLOCK.WATER || block === BLOCK.TORCH) continue;
         const faceCells = BLOCK_FACE_CELLS[block];
         for (const face of FACES) {
           const nx = x + face.dir[0], ny = y + face.dir[1], nz = z + face.dir[2];
@@ -1003,6 +1085,77 @@ const world = new World(WORLD_HEIGHT);
 const chunkMeshes = new Map(); // "cx,cz" -> THREE.Mesh (opaque blocks)
 const chunkWaterMeshes = new Map(); // "cx,cz" -> THREE.Mesh (transparent water), absent if chunk has none
 
+// ---------- Torches (placeable light source) ----------
+// A torch is a real block in the voxel grid (mineable, placeable, saved with
+// its chunk like any other block) but it isn't a full cube, so it's skipped
+// in buildChunkMesh and instead gets its own small mesh + light entity here.
+const torchEntities = new Map(); // "x,y,z" -> { group, light: THREE.PointLight|null }
+const MAX_ACTIVE_TORCH_LIGHTS = 20;
+
+function createTorchVisual(x, y, z) {
+  const group = new THREE.Group();
+  const handle = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.35, 0.1), new THREE.MeshLambertMaterial({ color: 0x6b4423 }));
+  handle.position.y = 0.15;
+  group.add(handle);
+  const flame = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.16, 0.14), new THREE.MeshBasicMaterial({ color: 0xffcc44 }));
+  flame.position.y = 0.38;
+  group.add(flame);
+  group.position.set(x + 0.5, y, z + 0.5);
+  scene.add(group);
+  return group;
+}
+
+function removeTorchEntity(key) {
+  const t = torchEntities.get(key);
+  if (!t) return;
+  scene.remove(t.group);
+  if (t.light) scene.remove(t.light);
+  torchEntities.delete(key);
+}
+
+// Ensures torch entities exist exactly where the chunk's block data has a
+// TORCH block, and nowhere else. Called whenever a chunk is (re)meshed, so
+// placing/breaking a torch or reloading a saved chunk both pick it up.
+function syncTorchesForChunk(chunk) {
+  const x0 = chunk.cx * CHUNK_SIZE, z0 = chunk.cz * CHUNK_SIZE;
+  for (let x = x0; x < x0 + CHUNK_SIZE; x++) {
+    for (let z = z0; z < z0 + CHUNK_SIZE; z++) {
+      for (let y = 0; y < world.height; y++) {
+        const key = x + ',' + y + ',' + z;
+        const isTorch = world.get(x, y, z) === BLOCK.TORCH;
+        const has = torchEntities.has(key);
+        if (isTorch && !has) torchEntities.set(key, { group: createTorchVisual(x, y, z), light: null });
+        else if (!isTorch && has) removeTorchEntity(key);
+      }
+    }
+  }
+}
+
+// Real-time point lights are expensive, so only the torches nearest the
+// player actually get one; farther torches still show their lit-up flame
+// mesh, they just don't cast dynamic light until the player gets close.
+function rebalanceTorchLights() {
+  const entries = Array.from(torchEntities.entries());
+  entries.sort((a, b) => {
+    const da = a[1].group.position.distanceToSquared(player.pos);
+    const db = b[1].group.position.distanceToSquared(player.pos);
+    return da - db;
+  });
+  entries.forEach(([, entity], i) => {
+    if (i < MAX_ACTIVE_TORCH_LIGHTS) {
+      if (!entity.light) {
+        const light = new THREE.PointLight(0xffaa55, 1.1, 9, 2);
+        light.position.copy(entity.group.position).add(new THREE.Vector3(0, 0.4, 0));
+        scene.add(light);
+        entity.light = light;
+      }
+    } else if (entity.light) {
+      scene.remove(entity.light);
+      entity.light = null;
+    }
+  });
+}
+
 function remeshChunk(cx, cz) {
   const key = world.chunkKey(cx, cz);
   const chunk = world.getChunkIfLoaded(cx, cz);
@@ -1018,7 +1171,17 @@ function remeshChunk(cx, cz) {
   const waterMesh = buildChunkWaterMesh(world, chunk);
   if (waterMesh) { scene.add(waterMesh); chunkWaterMeshes.set(key, waterMesh); }
 
+  syncTorchesForChunk(chunk);
+
   chunk.dirty = false;
+}
+
+function removeTorchesInChunk(cx, cz) {
+  const x0 = cx * CHUNK_SIZE, z0 = cz * CHUNK_SIZE;
+  for (const key of Array.from(torchEntities.keys())) {
+    const [tx, , tz] = key.split(',').map(Number);
+    if (tx >= x0 && tx < x0 + CHUNK_SIZE && tz >= z0 && tz < z0 + CHUNK_SIZE) removeTorchEntity(key);
+  }
 }
 
 // Re-meshes the chunk containing (x,z) plus any dirty already-loaded
@@ -1072,9 +1235,11 @@ function updateChunkStreaming(dt) {
         waterMesh.material.dispose();
         chunkWaterMeshes.delete(key);
       }
+      removeTorchesInChunk(cx, cz);
     }
   }
 
+  rebalanceTorchLights();
   despawnFarMobs();
 }
 
@@ -1290,6 +1455,25 @@ const crackMesh = new THREE.Mesh(
 );
 crackMesh.visible = false;
 scene.add(crackMesh);
+
+// ---------- Block highlight (outline on whatever block the player is looking at) ----------
+const highlightMesh = new THREE.LineSegments(
+  new THREE.EdgesGeometry(new THREE.BoxGeometry(1.002, 1.002, 1.002)),
+  new THREE.LineBasicMaterial({ color: 0x0a0a0a })
+);
+highlightMesh.visible = false;
+scene.add(highlightMesh);
+
+function updateBlockHighlight() {
+  if (!gameStarted || inventoryOpen) { highlightMesh.visible = false; return; }
+  const hit = raycastBlock();
+  if (hit) {
+    highlightMesh.visible = true;
+    highlightMesh.position.set(hit.hit.x + 0.5, hit.hit.y + 0.5, hit.hit.z + 0.5);
+  } else {
+    highlightMesh.visible = false;
+  }
+}
 
 let lastCrackStage = -1;
 function updateCrackMesh() {
@@ -1978,7 +2162,7 @@ function placeBlock() {
 // ---------- Physics / collision ----------
 function isSolid(x, y, z) {
   const block = world.get(Math.floor(x), Math.floor(y), Math.floor(z));
-  return block !== BLOCK.AIR && block !== BLOCK.WATER;
+  return block !== BLOCK.AIR && block !== BLOCK.WATER && block !== BLOCK.TORCH;
 }
 
 function collidesAt(pos) {
@@ -2099,6 +2283,8 @@ if (isMobile) {
   document.getElementById('mobileControls').classList.remove('hidden');
   const startHint = document.getElementById('startHint');
   if (startHint) startHint.textContent = 'Ketuk layar untuk mulai menjelajah.';
+  const infoEl = document.getElementById('info');
+  if (infoEl) infoEl.style.display = 'none'; // controls hint is meaningless once there's no keyboard
 
   const joyBase = document.getElementById('joystickBase');
   const joyKnob = document.getElementById('joystickKnob');
@@ -2193,6 +2379,34 @@ if (isMobile) {
   document.addEventListener('touchcancel', endLookTouch);
 }
 
+// ---------- Fullscreen toggle (both desktop and mobile: hides the browser
+// chrome so the page reads like a standalone app/game) ----------
+const btnFullscreen = document.getElementById('btnFullscreen');
+function isFullscreenActive() {
+  return !!(document.fullscreenElement || document.webkitFullscreenElement);
+}
+function updateFullscreenIcon() {
+  btnFullscreen.textContent = isFullscreenActive() ? '⤢' : '⛶';
+}
+function toggleFullscreen() {
+  const el = document.documentElement;
+  // Fullscreen can be denied (e.g. an embedding iframe without allow="fullscreen"),
+  // so swallow the rejection instead of leaving an unhandled promise around.
+  const request = !isFullscreenActive()
+    ? (el.requestFullscreen || el.webkitRequestFullscreen)?.call(el)
+    : (document.exitFullscreen || document.webkitExitFullscreen)?.call(document);
+  request?.catch(() => {});
+}
+btnFullscreen.addEventListener('click', toggleFullscreen);
+document.addEventListener('fullscreenchange', updateFullscreenIcon);
+document.addEventListener('webkitfullscreenchange', updateFullscreenIcon);
+
+// ---------- Inventory close button (a "Tekan E" hint is unreachable on
+// touch devices with the panel covering the mobile buttons underneath) ----------
+document.getElementById('btnCloseInventory').addEventListener('click', () => {
+  if (inventoryOpen) toggleInventory();
+});
+
 // ---------- Main loop ----------
 let lastTime = performance.now();
 let autosaveAccumulator = 0;
@@ -2207,6 +2421,7 @@ function animate() {
   if (gameStarted && !inventoryOpen) {
     updatePhysics(dt);
     updateMining(dt);
+    updateBlockHighlight();
     updateItemDrops(dt);
     updateMobs(dt);
     updateHunger(dt);

@@ -394,3 +394,41 @@ canvas {
 #btnPlace { right: 8px; bottom: 108px; }
 #btnSprint { right: 88px; bottom: 118px; }
 #btnInventory { right: 140px; bottom: 60px; }
+
+#btnFullscreen {
+  position: fixed;
+  top: 10px;
+  right: 10px;
+  z-index: 30;
+  width: 40px;
+  height: 40px;
+  border-radius: 6px;
+  border: 2px solid rgba(255,255,255,0.4);
+  background: rgba(0,0,0,0.35);
+  color: white;
+  font-size: 20px;
+  cursor: pointer;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+#btnFullscreen:active {
+  background: rgba(255,255,255,0.25);
+}
+
+#btnCloseInventory {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  padding: 8px 16px;
+  border: none;
+  border-radius: 6px;
+  background: #c0392b;
+  color: white;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+#btnCloseInventory:hover {
+  background: #a93226;
+}
