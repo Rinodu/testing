@@ -1669,7 +1669,7 @@ const startBtn = document.getElementById('startBtn');
 function startGame() {
   gameStarted = true;
   overlay.classList.add('hidden');
-  domElement.requestPointerLock();
+  if (!isMobile) domElement.requestPointerLock(); // pointer lock is a desktop-only concept
   ensureAudio(); // browsers require a user gesture before audio can play
   if (pendingSave) showToast('Progres dimuat dari save sebelumnya');
 }
@@ -1677,7 +1677,7 @@ function startGame() {
 startBtn.addEventListener('click', startGame);
 domElement.addEventListener('click', () => {
   if (!gameStarted) startGame();
-  else if (!isLocked) domElement.requestPointerLock();
+  else if (!isLocked && !isMobile) domElement.requestPointerLock();
 });
 
 document.addEventListener('pointerlockchange', () => {
@@ -1816,7 +1816,7 @@ function toggleInventory() {
   if (inventoryOpen) {
     renderInventoryPanel();
     if (isLocked) document.exitPointerLock();
-  } else {
+  } else if (!isMobile) {
     domElement.requestPointerLock();
   }
 }
@@ -2006,9 +2006,16 @@ function updatePhysics(dt) {
   if (keys['KeyS']) { moveX += forward.x; moveZ += forward.z; }
   if (keys['KeyA']) { moveX -= right.x; moveZ -= right.z; }
   if (keys['KeyD']) { moveX += right.x; moveZ += right.z; }
+  if (touchJoystick.active) {
+    // dy is negative when the knob is pushed up (forward), matching KeyW's sign
+    moveX += touchJoystick.dy * forward.x + touchJoystick.dx * right.x;
+    moveZ += touchJoystick.dy * forward.z + touchJoystick.dx * right.z;
+  }
 
+  // joystick gives analog speed control (partial tilt = slower); keyboard is always full speed
+  const joyMag = touchJoystick.active ? Math.min(1, Math.hypot(touchJoystick.dx, touchJoystick.dy)) : 1;
   const len = Math.hypot(moveX, moveZ);
-  if (len > 0) { moveX /= len; moveZ /= len; }
+  if (len > 0) { moveX = (moveX / len) * joyMag; moveZ = (moveZ / len) * joyMag; }
 
   const feetInWater = world.get(Math.floor(player.pos.x), Math.floor(player.pos.y - 0.3), Math.floor(player.pos.z)) === BLOCK.WATER;
   if (feetInWater && !player.inWater) playSplashSound();
@@ -2078,6 +2085,112 @@ function updatePhysics(dt) {
   } else {
     footstepAccumulator = 0.2; // next step plays almost immediately once moving resumes
   }
+}
+
+// ---------- Mobile touch controls (joystick + buttons; hidden entirely on desktop) ----------
+// Detected via touch support + a coarse pointer, not screen width, so a
+// touch-capable laptop with a mouse still gets the desktop (keyboard/mouse)
+// controls instead of an unwanted on-screen joystick.
+const isMobile = ('ontouchstart' in window || navigator.maxTouchPoints > 0) && window.matchMedia('(pointer: coarse)').matches;
+
+const touchJoystick = { active: false, dx: 0, dy: 0 };
+
+if (isMobile) {
+  document.getElementById('mobileControls').classList.remove('hidden');
+  const startHint = document.getElementById('startHint');
+  if (startHint) startHint.textContent = 'Ketuk layar untuk mulai menjelajah.';
+
+  const joyBase = document.getElementById('joystickBase');
+  const joyKnob = document.getElementById('joystickKnob');
+  const JOY_RADIUS = 45; // px; matches #joystickBase size in style.css
+  let joyTouchId = null;
+
+  function updateJoyFromTouch(t) {
+    const rect = joyBase.getBoundingClientRect();
+    const cx = rect.left + rect.width / 2, cy = rect.top + rect.height / 2;
+    let dx = t.clientX - cx, dy = t.clientY - cy;
+    const dist = Math.hypot(dx, dy);
+    const clamped = Math.min(dist, JOY_RADIUS);
+    if (dist > 0) { dx = (dx / dist) * clamped; dy = (dy / dist) * clamped; }
+    joyKnob.style.transform = `translate(${dx}px, ${dy}px)`;
+    touchJoystick.dx = dx / JOY_RADIUS;
+    touchJoystick.dy = dy / JOY_RADIUS;
+  }
+  function resetJoystick() {
+    touchJoystick.active = false;
+    touchJoystick.dx = 0;
+    touchJoystick.dy = 0;
+    joyKnob.style.transform = 'translate(0px, 0px)';
+  }
+  joyBase.addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    joyTouchId = e.changedTouches[0].identifier;
+    touchJoystick.active = true;
+    updateJoyFromTouch(e.changedTouches[0]);
+  });
+  joyBase.addEventListener('touchmove', (e) => {
+    e.preventDefault();
+    for (const t of e.changedTouches) if (t.identifier === joyTouchId) updateJoyFromTouch(t);
+  });
+  function endJoyTouch(e) {
+    for (const t of e.changedTouches) if (t.identifier === joyTouchId) { joyTouchId = null; resetJoystick(); }
+  }
+  joyBase.addEventListener('touchend', endJoyTouch);
+  joyBase.addEventListener('touchcancel', endJoyTouch);
+
+  // Hold-buttons: press-and-hold sets a state, release clears it.
+  function bindHoldButton(id, onStart, onEnd) {
+    const el = document.getElementById(id);
+    el.addEventListener('touchstart', (e) => { e.preventDefault(); onStart(); });
+    el.addEventListener('touchend', (e) => { e.preventDefault(); if (onEnd) onEnd(); });
+    el.addEventListener('touchcancel', () => { if (onEnd) onEnd(); });
+  }
+  bindHoldButton('btnJump', () => { keys['Space'] = true; }, () => { keys['Space'] = false; });
+  bindHoldButton('btnMine', () => { if (gameStarted && !inventoryOpen) { mouseDown0 = true; startMiningOrPunch(); } }, () => { mouseDown0 = false; stopMining(); });
+  bindHoldButton('btnSprint', () => { keys['ShiftLeft'] = true; }, () => { keys['ShiftLeft'] = false; });
+  document.getElementById('btnPlace').addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    if (gameStarted && !inventoryOpen) placeBlock();
+  });
+  document.getElementById('btnInventory').addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    if (gameStarted) toggleInventory();
+    else startGame();
+  });
+
+  // Camera look: drag anywhere on screen that isn't the joystick/buttons.
+  let lookTouchId = null, lastLookX = 0, lastLookY = 0;
+  function isOnMobileControls(target) {
+    return !!(target.closest && target.closest('#mobileControls'));
+  }
+  document.addEventListener('touchstart', (e) => {
+    if (!gameStarted) return;
+    for (const t of e.changedTouches) {
+      if (lookTouchId === null && !isOnMobileControls(t.target)) {
+        lookTouchId = t.identifier;
+        lastLookX = t.clientX;
+        lastLookY = t.clientY;
+      }
+    }
+  });
+  document.addEventListener('touchmove', (e) => {
+    for (const t of e.changedTouches) {
+      if (t.identifier !== lookTouchId) continue;
+      const dx = t.clientX - lastLookX, dy = t.clientY - lastLookY;
+      lastLookX = t.clientX;
+      lastLookY = t.clientY;
+      const sensitivity = 0.006;
+      player.yaw -= dx * sensitivity;
+      player.pitch -= dy * sensitivity;
+      const limit = Math.PI / 2 - 0.05;
+      player.pitch = Math.max(-limit, Math.min(limit, player.pitch));
+    }
+  });
+  function endLookTouch(e) {
+    for (const t of e.changedTouches) if (t.identifier === lookTouchId) lookTouchId = null;
+  }
+  document.addEventListener('touchend', endLookTouch);
+  document.addEventListener('touchcancel', endLookTouch);
 }
 
 // ---------- Main loop ----------
