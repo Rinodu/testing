@@ -3,8 +3,8 @@
 // ---------- Config ----------
 const CHUNK_SIZE = 16;        // chunk width/depth in blocks
 const WORLD_HEIGHT = 28;      // max height (blocks)
-const RENDER_DISTANCE = 4;    // chunks kept meshed/visible around the player
-const UNLOAD_DISTANCE = 6;    // chunks farther than this get their mesh disposed
+let RENDER_DISTANCE = 4;      // chunks kept meshed/visible around the player; adjustable in Settings
+let UNLOAD_DISTANCE = 6;      // chunks farther than this get their mesh disposed (kept as RENDER_DISTANCE+2)
 const CHUNK_UPDATE_INTERVAL = 0.3; // seconds between chunk stream checks
 const REACH = 6;              // block interaction reach distance
 const GRAVITY = 20;
@@ -33,6 +33,7 @@ const BLOCK = {
   SNOW: 9,
   WATER: 10,
   TORCH: 11,
+  FURNACE: 12,
 };
 
 const BLOCK_NAMES = {
@@ -47,9 +48,10 @@ const BLOCK_NAMES = {
   [BLOCK.SNOW]: 'Salju',
   [BLOCK.WATER]: 'Air',
   [BLOCK.TORCH]: 'Obor',
+  [BLOCK.FURNACE]: 'Furnace',
 };
 
-const HOTBAR_BLOCKS = [BLOCK.GRASS, BLOCK.DIRT, BLOCK.STONE, BLOCK.WOOD, BLOCK.LEAVES, BLOCK.SAND, BLOCK.SNOW, BLOCK.TORCH];
+const HOTBAR_BLOCKS = [BLOCK.GRASS, BLOCK.DIRT, BLOCK.STONE, BLOCK.WOOD, BLOCK.LEAVES, BLOCK.SAND, BLOCK.SNOW, BLOCK.TORCH, BLOCK.FURNACE];
 
 // Non-block items (crafted goods / food / raw ore). IDs are offset well past
 // BLOCK ids so they can share the same `inventory` dictionary without colliding.
@@ -61,6 +63,7 @@ const ITEM = {
   COAL: 104,
   IRON: 105,
   IRON_PICKAXE: 106,
+  IRON_INGOT: 107,
 };
 
 const ITEM_META = {
@@ -71,6 +74,7 @@ const ITEM_META = {
   [ITEM.COAL]: { label: 'Batu Bara', color: 0x2b2b2b },
   [ITEM.IRON]: { label: 'Besi Mentah', color: 0xd8c8b8 },
   [ITEM.IRON_PICKAXE]: { label: 'Pickaxe Besi', color: 0xdedede },
+  [ITEM.IRON_INGOT]: { label: 'Besi Batangan', color: 0xf0ead6 },
 };
 
 function itemLabel(id) {
@@ -82,9 +86,16 @@ const RECIPES = [
   { inputs: { [BLOCK.WOOD]: 1 }, output: ITEM.STICK, outputCount: 4 },
   { inputs: { [BLOCK.STONE]: 3, [ITEM.STICK]: 2 }, output: ITEM.STONE_PICKAXE, outputCount: 1 },
   { inputs: { [BLOCK.WOOD]: 3, [ITEM.STICK]: 2 }, output: ITEM.WOOD_AXE, outputCount: 1 },
-  { inputs: { [ITEM.IRON]: 3, [ITEM.STICK]: 2 }, output: ITEM.IRON_PICKAXE, outputCount: 1 },
+  { inputs: { [ITEM.IRON_INGOT]: 3, [ITEM.STICK]: 2 }, output: ITEM.IRON_PICKAXE, outputCount: 1 },
   { inputs: { [ITEM.COAL]: 1, [ITEM.STICK]: 1 }, output: BLOCK.TORCH, outputCount: 4 },
+  { inputs: { [BLOCK.STONE]: 8 }, output: BLOCK.FURNACE, outputCount: 1 },
 ];
+
+// Smelting: raw iron ore (ITEM.IRON) needs to be smelted in a furnace (using
+// coal as fuel) into a usable ingot before it can be used for tools --
+// separate from RECIPES since it takes time instead of being instant, and is
+// gated on owning a furnace block rather than a hotbar selection.
+const SMELT_RECIPE = { input: ITEM.IRON, fuel: ITEM.COAL, output: ITEM.IRON_INGOT, outputCount: 1, seconds: 4 };
 
 // Blocks that a pickaxe (stone/iron) speeds up mining for; iron ore additionally
 // requires owning at least a stone pickaxe to drop anything, like Minecraft's
@@ -103,6 +114,7 @@ const BLOCK_HARDNESS = {
   [BLOCK.IRON_ORE]: 1.8,
   [BLOCK.SNOW]: 0.35,
   [BLOCK.TORCH]: 0.1,
+  [BLOCK.FURNACE]: 1.5,
 };
 
 // What a block drops when mined (grass drops dirt, like Minecraft). Ores are
@@ -116,6 +128,7 @@ const BLOCK_DROP = {
   [BLOCK.SAND]: BLOCK.SAND,
   [BLOCK.SNOW]: BLOCK.SNOW,
   [BLOCK.TORCH]: BLOCK.TORCH,
+  [BLOCK.FURNACE]: BLOCK.FURNACE,
 };
 
 // Ore/tool-aware version of BLOCK_DROP. Returns null when nothing should drop
@@ -151,6 +164,8 @@ const TEX_CELL = {
   IRON_ORE: [1, 2],
   SNOW: [2, 2],
   TORCH: [3, 2],
+  FURNACE_TOP: [0, 3],
+  FURNACE_SIDE: [1, 3],
 };
 
 const BLOCK_FACE_CELLS = {
@@ -166,6 +181,7 @@ const BLOCK_FACE_CELLS = {
   // Torch isn't a real cube in the world (see buildChunkMesh/isTransparentBlock),
   // this entry only exists so its hotbar icon and dropped-item cube can use the atlas.
   [BLOCK.TORCH]: { top: TEX_CELL.TORCH, bottom: TEX_CELL.TORCH, side: TEX_CELL.TORCH },
+  [BLOCK.FURNACE]: { top: TEX_CELL.FURNACE_TOP, bottom: TEX_CELL.FURNACE_TOP, side: TEX_CELL.FURNACE_SIDE },
 };
 
 function seededRandomFn(seed) {
@@ -333,6 +349,23 @@ function buildTextureAtlas() {
     ctx.fillRect(x0 + 5, y0 + 2, 6, 5);
     ctx.fillStyle = '#ff9922';
     ctx.fillRect(x0 + 6, y0 + 3, 4, 3);
+  }
+
+  // FURNACE_TOP: stone with a dark vent
+  {
+    const [x0, y0] = cellOrigin(TEX_CELL.FURNACE_TOP);
+    noiseFill(x0, y0, [120, 120, 118], 14, 1420);
+    ctx.fillStyle = '#3a3a38';
+    ctx.fillRect(x0 + 5, y0 + 5, 6, 6);
+  }
+  // FURNACE_SIDE: stone with a dark furnace mouth opening
+  {
+    const [x0, y0] = cellOrigin(TEX_CELL.FURNACE_SIDE);
+    noiseFill(x0, y0, [120, 120, 118], 14, 1421);
+    ctx.fillStyle = '#1a1a18';
+    ctx.fillRect(x0 + 4, y0 + 9, 8, 6);
+    ctx.fillStyle = '#ff8833';
+    ctx.fillRect(x0 + 5, y0 + 10, 6, 2);
   }
 
   const texture = new THREE.CanvasTexture(canvas);
@@ -1364,6 +1397,71 @@ function showToast(text) {
   toastTimer = setTimeout(() => el.classList.remove('visible'), 2000);
 }
 
+// ---------- Settings (mouse sensitivity, render distance, volume) ----------
+const SETTINGS_KEY = 'blockyworld_settings_v1';
+let mouseSensitivityMul = 1.0;
+let masterVolume = 0.6;
+
+function loadSettings() {
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY);
+    if (!raw) return;
+    const s = JSON.parse(raw);
+    if (typeof s.sensitivity === 'number') mouseSensitivityMul = s.sensitivity;
+    if (typeof s.renderDistance === 'number') RENDER_DISTANCE = s.renderDistance;
+    if (typeof s.volume === 'number') masterVolume = s.volume;
+  } catch (e) { /* corrupted/unavailable storage: just use defaults */ }
+  UNLOAD_DISTANCE = RENDER_DISTANCE + 2;
+}
+loadSettings();
+
+function saveSettings() {
+  try {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify({
+      sensitivity: mouseSensitivityMul, renderDistance: RENDER_DISTANCE, volume: masterVolume,
+    }));
+  } catch (e) { /* ignore */ }
+}
+
+function initSettingsUI() {
+  const panel = document.getElementById('settingsPanel');
+  const btnSettings = document.getElementById('btnSettings');
+  const sliderSensitivity = document.getElementById('sliderSensitivity');
+  const sliderRenderDistance = document.getElementById('sliderRenderDistance');
+  const sliderVolume = document.getElementById('sliderVolume');
+  const sensitivityValue = document.getElementById('sensitivityValue');
+  const renderDistanceValue = document.getElementById('renderDistanceValue');
+  const volumeValue = document.getElementById('volumeValue');
+
+  sliderSensitivity.value = mouseSensitivityMul;
+  sliderRenderDistance.value = RENDER_DISTANCE;
+  sliderVolume.value = masterVolume;
+  sensitivityValue.textContent = mouseSensitivityMul.toFixed(1);
+  renderDistanceValue.textContent = RENDER_DISTANCE;
+  volumeValue.textContent = Math.round(masterVolume * 100) + '%';
+
+  btnSettings.addEventListener('click', () => panel.classList.remove('hidden'));
+  document.getElementById('btnCloseSettings').addEventListener('click', () => {
+    panel.classList.add('hidden');
+    saveSettings();
+  });
+
+  sliderSensitivity.addEventListener('input', () => {
+    mouseSensitivityMul = parseFloat(sliderSensitivity.value);
+    sensitivityValue.textContent = mouseSensitivityMul.toFixed(1);
+  });
+  sliderRenderDistance.addEventListener('input', () => {
+    RENDER_DISTANCE = parseInt(sliderRenderDistance.value, 10);
+    UNLOAD_DISTANCE = RENDER_DISTANCE + 2;
+    renderDistanceValue.textContent = RENDER_DISTANCE;
+  });
+  sliderVolume.addEventListener('input', () => {
+    masterVolume = parseFloat(sliderVolume.value);
+    volumeValue.textContent = Math.round(masterVolume * 100) + '%';
+  });
+}
+initSettingsUI();
+
 // ---------- Sound effects (synthesized with Web Audio, no external audio files) ----------
 let audioCtx = null;
 function ensureAudio() {
@@ -1376,13 +1474,14 @@ function ensureAudio() {
 }
 
 function playTone(freq, duration, type = 'sine', volume = 0.2) {
+  if (masterVolume <= 0) return;
   const ctx = ensureAudio();
   if (!ctx) return;
   const osc = ctx.createOscillator();
   const gain = ctx.createGain();
   osc.type = type;
   osc.frequency.value = freq;
-  gain.gain.value = volume;
+  gain.gain.value = volume * masterVolume;
   gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + duration);
   osc.connect(gain);
   gain.connect(ctx.destination);
@@ -1391,6 +1490,7 @@ function playTone(freq, duration, type = 'sine', volume = 0.2) {
 }
 
 function playNoiseBurst(duration, volume = 0.15, filterFreq = 2000) {
+  if (masterVolume <= 0) return;
   const ctx = ensureAudio();
   if (!ctx) return;
   const bufferSize = Math.max(1, Math.floor(ctx.sampleRate * duration));
@@ -1403,7 +1503,7 @@ function playNoiseBurst(duration, volume = 0.15, filterFreq = 2000) {
   filter.type = 'lowpass';
   filter.frequency.value = filterFreq;
   const gain = ctx.createGain();
-  gain.gain.value = volume;
+  gain.gain.value = volume * masterVolume;
   src.connect(filter);
   filter.connect(gain);
   gain.connect(ctx.destination);
@@ -1670,7 +1770,9 @@ function renderHunger() {
 renderHunger();
 
 let lastDamageTime = -Infinity;
+let isDead = false;
 function damagePlayer(amount) {
+  if (isDead) return;
   const now = performance.now() / 1000;
   if (now - lastDamageTime < 0.5) return;
   lastDamageTime = now;
@@ -1678,13 +1780,23 @@ function damagePlayer(amount) {
   renderHealth();
   playHurtSound();
   if (player.health <= 0) {
-    player.pos.set(spawnX + 0.5, world.heightAt(spawnX, spawnZ) + 1 + PLAYER_HEIGHT, spawnZ + 0.5);
-    player.vel.set(0, 0, 0);
-    player.health = MAX_HEALTH;
-    player.hunger = MAX_HUNGER;
-    renderHealth();
-    renderHunger();
+    isDead = true;
+    if (isLocked) document.exitPointerLock();
+    document.getElementById('deathScreen').classList.remove('hidden');
+    playHurtSound();
   }
+}
+
+function respawnPlayer() {
+  player.pos.set(spawnX + 0.5, world.heightAt(spawnX, spawnZ) + 1 + PLAYER_HEIGHT, spawnZ + 0.5);
+  player.vel.set(0, 0, 0);
+  player.health = MAX_HEALTH;
+  player.hunger = MAX_HUNGER;
+  renderHealth();
+  renderHunger();
+  isDead = false;
+  document.getElementById('deathScreen').classList.add('hidden');
+  if (!isMobile) domElement.requestPointerLock();
 }
 
 let hungerAccumulator = 0;
@@ -1869,13 +1981,16 @@ const MOB_TYPES = {
   COW: 'cow',
   GOAT: 'goat',
   ZOMBIE: 'zombie',
+  CHICKEN: 'chicken',
+  PIG: 'pig',
+  SKELETON: 'skeleton',
 };
 
 // ---------- Procedural mob texture atlas ----------
 // Same technique as the block atlas: original pixel-art painted by code, not
 // a copy of Mojang's actual mob textures (those are copyrighted assets).
 const MOB_ATLAS_COLS = 4;
-const MOB_ATLAS_ROWS = 3;
+const MOB_ATLAS_ROWS = 6;
 const MOB_CELL_PX = 16;
 const MOB_CELL_U = 1 / MOB_ATLAS_COLS;
 const MOB_CELL_V = 1 / MOB_ATLAS_ROWS;
@@ -1884,6 +1999,9 @@ const MOB_TEX_CELL = {
   COW_BODY: [0, 0], COW_HEAD: [1, 0], COW_LEG: [2, 0], COW_PATCH: [3, 0],
   GOAT_BODY: [0, 1], GOAT_HEAD: [1, 1], GOAT_HORN: [2, 1], GOAT_LEG: [3, 1],
   ZOMBIE_BODY: [0, 2], ZOMBIE_HEAD: [1, 2], ZOMBIE_ARM: [2, 2], ZOMBIE_LEG: [3, 2],
+  CHICKEN_BODY: [0, 3], CHICKEN_HEAD: [1, 3], CHICKEN_LEG: [2, 3], PIG_BODY: [3, 3],
+  PIG_HEAD: [0, 4], PIG_LEG: [1, 4], SKELETON_BODY: [2, 4], SKELETON_HEAD: [3, 4],
+  SKELETON_ARM: [0, 5], SKELETON_LEG: [1, 5],
 };
 
 function buildMobTextureAtlas() {
@@ -1987,6 +2105,69 @@ function buildMobTextureAtlas() {
     noiseFillOn(ctx, x0, y0, P, P, [52, 58, 88], 10, 2305);
   }
 
+  // CHICKEN_BODY: white feathers
+  {
+    const [x0, y0] = origin(MOB_TEX_CELL.CHICKEN_BODY);
+    noiseFillOn(ctx, x0, y0, P, P, [240, 238, 230], 10, 2401);
+  }
+  // CHICKEN_HEAD: white with a red comb and eye dots
+  {
+    const [x0, y0] = origin(MOB_TEX_CELL.CHICKEN_HEAD);
+    noiseFillOn(ctx, x0, y0, P, P, [240, 238, 230], 10, 2402);
+    ctx.fillStyle = '#c62828';
+    ctx.fillRect(x0 + 6, y0 + 1, 4, 3);
+    eyeDots(x0, y0);
+  }
+  // CHICKEN_LEG: yellow-orange
+  {
+    const [x0, y0] = origin(MOB_TEX_CELL.CHICKEN_LEG);
+    noiseFillOn(ctx, x0, y0, P, P, [225, 175, 60], 10, 2403);
+  }
+  // PIG_BODY: pink hide
+  {
+    const [x0, y0] = origin(MOB_TEX_CELL.PIG_BODY);
+    noiseFillOn(ctx, x0, y0, P, P, [232, 165, 172], 10, 2404);
+  }
+  // PIG_HEAD: pink with a darker snout patch and eyes
+  {
+    const [x0, y0] = origin(MOB_TEX_CELL.PIG_HEAD);
+    noiseFillOn(ctx, x0, y0, P, P, [232, 165, 172], 10, 2405);
+    ctx.fillStyle = '#c97b8a';
+    ctx.fillRect(x0 + 5, y0 + 10, 6, 5);
+    eyeDots(x0, y0);
+  }
+  // PIG_LEG: pink, slightly darker
+  {
+    const [x0, y0] = origin(MOB_TEX_CELL.PIG_LEG);
+    noiseFillOn(ctx, x0, y0, P, P, [210, 145, 152], 8, 2406);
+  }
+  // SKELETON_BODY: bone white with dark rib streaks
+  {
+    const [x0, y0] = origin(MOB_TEX_CELL.SKELETON_BODY);
+    noiseFillOn(ctx, x0, y0, P, P, [222, 218, 205], 10, 2501);
+    ctx.strokeStyle = 'rgba(90,85,75,0.6)';
+    for (let i = 0; i < 4; i++) {
+      ctx.beginPath(); ctx.moveTo(x0 + 2, y0 + 3 + i * 3); ctx.lineTo(x0 + P - 2, y0 + 3 + i * 3); ctx.stroke();
+    }
+  }
+  // SKELETON_HEAD: bone white with hollow black eye sockets
+  {
+    const [x0, y0] = origin(MOB_TEX_CELL.SKELETON_HEAD);
+    noiseFillOn(ctx, x0, y0, P, P, [222, 218, 205], 10, 2502);
+    ctx.fillStyle = '#111';
+    ctx.fillRect(x0 + 3, y0 + 6, 4, 4);
+    ctx.fillRect(x0 + 9, y0 + 6, 4, 4);
+  }
+  // SKELETON_ARM / SKELETON_LEG: plain bone white
+  {
+    const [x0, y0] = origin(MOB_TEX_CELL.SKELETON_ARM);
+    noiseFillOn(ctx, x0, y0, P, P, [222, 218, 205], 10, 2503);
+  }
+  {
+    const [x0, y0] = origin(MOB_TEX_CELL.SKELETON_LEG);
+    noiseFillOn(ctx, x0, y0, P, P, [222, 218, 205], 10, 2504);
+  }
+
   const texture = new THREE.CanvasTexture(canvas);
   texture.magFilter = THREE.NearestFilter;
   texture.minFilter = THREE.NearestFilter;
@@ -2060,9 +2241,63 @@ function createZombie() {
   return { group, legs, eyeHeight: 1.6, hitRadius: 0.5 };
 }
 
-const MOB_FACTORY = { [MOB_TYPES.COW]: createCow, [MOB_TYPES.GOAT]: createGoat, [MOB_TYPES.ZOMBIE]: createZombie };
-const MOB_HEALTH = { [MOB_TYPES.COW]: 6, [MOB_TYPES.GOAT]: 6, [MOB_TYPES.ZOMBIE]: 10 };
-const MOB_SPEED = { [MOB_TYPES.COW]: 1.2, [MOB_TYPES.GOAT]: 1.6, [MOB_TYPES.ZOMBIE]: 2.1 };
+function createChicken() {
+  const group = new THREE.Group();
+  const body = boxPart(0.3, 0.25, 0.35, MOB_TEX_CELL.CHICKEN_BODY);
+  body.position.set(0, 0.3, 0);
+  group.add(body);
+  const head = boxPart(0.18, 0.18, 0.18, MOB_TEX_CELL.CHICKEN_HEAD);
+  head.position.set(0, 0.42, 0.24);
+  group.add(head);
+  const legGeo = () => boxPart(0.06, 0.2, 0.06, MOB_TEX_CELL.CHICKEN_LEG);
+  const legOffsets = [[-0.08, 0.1, 0.05], [0.08, 0.1, 0.05]];
+  const legs = legOffsets.map((o) => { const l = legGeo(); l.position.set(...o); group.add(l); return l; });
+  return { group, legs, eyeHeight: 0.4, hitRadius: 0.3 };
+}
+
+function createPig() {
+  const group = new THREE.Group();
+  const body = boxPart(0.45, 0.4, 0.75, MOB_TEX_CELL.PIG_BODY);
+  body.position.set(0, 0.4, 0);
+  group.add(body);
+  const head = boxPart(0.3, 0.3, 0.3, MOB_TEX_CELL.PIG_HEAD);
+  head.position.set(0, 0.42, 0.5);
+  group.add(head);
+  const legGeo = () => boxPart(0.13, 0.32, 0.13, MOB_TEX_CELL.PIG_LEG);
+  const legOffsets = [[-0.16, 0.16, 0.24], [0.16, 0.16, 0.24], [-0.16, 0.16, -0.24], [0.16, 0.16, -0.24]];
+  const legs = legOffsets.map((o) => { const l = legGeo(); l.position.set(...o); group.add(l); return l; });
+  return { group, legs, eyeHeight: 0.7, hitRadius: 0.5 };
+}
+
+function createSkeleton() {
+  const group = new THREE.Group();
+  const body = boxPart(0.36, 0.55, 0.2, MOB_TEX_CELL.SKELETON_BODY);
+  body.position.set(0, 0.85, 0);
+  group.add(body);
+  const head = boxPart(0.3, 0.3, 0.3, MOB_TEX_CELL.SKELETON_HEAD);
+  head.position.set(0, 1.28, 0);
+  group.add(head);
+  const armGeo = () => boxPart(0.11, 0.5, 0.11, MOB_TEX_CELL.SKELETON_ARM);
+  const armL = armGeo(); armL.position.set(-0.24, 0.85, 0); group.add(armL);
+  const armR = armGeo(); armR.position.set(0.24, 0.85, 0); group.add(armR);
+  const legGeo = () => boxPart(0.14, 0.5, 0.14, MOB_TEX_CELL.SKELETON_LEG);
+  const legOffsets = [[-0.1, 0.28, 0], [0.1, 0.28, 0]];
+  const legs = legOffsets.map((o) => { const l = legGeo(); l.position.set(...o); group.add(l); return l; });
+  return { group, legs, eyeHeight: 1.5, hitRadius: 0.48 };
+}
+
+const MOB_FACTORY = {
+  [MOB_TYPES.COW]: createCow, [MOB_TYPES.GOAT]: createGoat, [MOB_TYPES.ZOMBIE]: createZombie,
+  [MOB_TYPES.CHICKEN]: createChicken, [MOB_TYPES.PIG]: createPig, [MOB_TYPES.SKELETON]: createSkeleton,
+};
+const MOB_HEALTH = {
+  [MOB_TYPES.COW]: 6, [MOB_TYPES.GOAT]: 6, [MOB_TYPES.ZOMBIE]: 10,
+  [MOB_TYPES.CHICKEN]: 3, [MOB_TYPES.PIG]: 6, [MOB_TYPES.SKELETON]: 8,
+};
+const MOB_SPEED = {
+  [MOB_TYPES.COW]: 1.2, [MOB_TYPES.GOAT]: 1.6, [MOB_TYPES.ZOMBIE]: 2.1,
+  [MOB_TYPES.CHICKEN]: 1.4, [MOB_TYPES.PIG]: 1.3, [MOB_TYPES.SKELETON]: 1.7,
+};
 
 const mobs = [];
 
@@ -2086,6 +2321,7 @@ function spawnMob(type, x, z) {
     hurtFlashTimer: 0,
     animT: Math.random() * Math.PI * 2,
     facing: 0,
+    shootCooldown: Math.random() * 2, // staggers skeletons so they don't all fire in sync
   });
 }
 
@@ -2110,11 +2346,27 @@ function maybeSpawnMobsInChunk(chunk) {
     const h = world.heightAt(p.x, p.z);
     if (h > 0 && world.get(p.x, h, p.z) === BLOCK.GRASS) spawnMob(MOB_TYPES.GOAT, p.x + 0.5, p.z + 0.5);
   }
+  if (Math.random() < 0.3) {
+    const p = randomSpotInChunk();
+    const h = world.heightAt(p.x, p.z);
+    if (h > 0 && world.get(p.x, h, p.z) === BLOCK.GRASS) spawnMob(MOB_TYPES.CHICKEN, p.x + 0.5, p.z + 0.5);
+  }
+  if (Math.random() < 0.22) {
+    const p = randomSpotInChunk();
+    const h = world.heightAt(p.x, p.z);
+    if (h > 0 && world.get(p.x, h, p.z) === BLOCK.GRASS) spawnMob(MOB_TYPES.PIG, p.x + 0.5, p.z + 0.5);
+  }
   const zombieChance = isNight ? 0.18 : 0.05;
   if (Math.random() < zombieChance) {
     const p = randomSpotInChunk();
     const h = world.heightAt(p.x, p.z);
     if (h > 0) spawnMob(MOB_TYPES.ZOMBIE, p.x + 0.5, p.z + 0.5);
+  }
+  const skeletonChance = isNight ? 0.1 : 0.02;
+  if (Math.random() < skeletonChance) {
+    const p = randomSpotInChunk();
+    const h = world.heightAt(p.x, p.z);
+    if (h > 0) spawnMob(MOB_TYPES.SKELETON, p.x + 0.5, p.z + 0.5);
   }
 }
 
@@ -2129,6 +2381,52 @@ function despawnFarMobs() {
   }
 }
 
+// ---------- Skeleton arrows (simple straight-line projectile, no gravity arc) ----------
+const projectiles = [];
+const ARROW_SPEED = 14;
+const ARROW_LIFETIME = 4;
+
+function spawnArrow(fromPos, toPos) {
+  const dir = new THREE.Vector3().subVectors(toPos, fromPos).normalize();
+  const mesh = new THREE.Mesh(
+    new THREE.BoxGeometry(0.06, 0.06, 0.45),
+    new THREE.MeshBasicMaterial({ color: 0x4a3a28 })
+  );
+  mesh.position.copy(fromPos);
+  mesh.lookAt(fromPos.clone().add(dir));
+  scene.add(mesh);
+  projectiles.push({ mesh, vel: dir.multiplyScalar(ARROW_SPEED), spawnTime: performance.now() / 1000 });
+}
+
+function removeProjectile(i) {
+  const p = projectiles[i];
+  scene.remove(p.mesh);
+  p.mesh.geometry.dispose();
+  p.mesh.material.dispose();
+  projectiles.splice(i, 1);
+}
+
+function updateProjectiles(dt) {
+  const now = performance.now() / 1000;
+  for (let i = projectiles.length - 1; i >= 0; i--) {
+    const p = projectiles[i];
+    p.mesh.position.addScaledVector(p.vel, dt);
+
+    const dEye = p.mesh.position.distanceTo(player.pos);
+    const dFeet = p.mesh.position.distanceTo(new THREE.Vector3(player.pos.x, player.pos.y - PLAYER_HEIGHT * 0.5, player.pos.z));
+    if (Math.min(dEye, dFeet) < 0.7) {
+      damagePlayer(2);
+      removeProjectile(i);
+      continue;
+    }
+    if (isSolid(p.mesh.position.x, p.mesh.position.y, p.mesh.position.z)) {
+      removeProjectile(i);
+      continue;
+    }
+    if (now - p.spawnTime > ARROW_LIFETIME) removeProjectile(i);
+  }
+}
+
 function punchMob(mob) {
   mob.health -= 4;
   mob.hurtFlashTimer = 0.15;
@@ -2138,7 +2436,7 @@ function punchMob(mob) {
   mob.pos.x += (dx / len) * 0.4;
   mob.pos.z += (dz / len) * 0.4;
   if (mob.health <= 0) {
-    if (mob.type === MOB_TYPES.COW || mob.type === MOB_TYPES.GOAT) {
+    if ([MOB_TYPES.COW, MOB_TYPES.GOAT, MOB_TYPES.CHICKEN, MOB_TYPES.PIG].includes(mob.type)) {
       spawnItemDrop(mob.pos.x, mob.pos.y + 0.5, mob.pos.z, ITEM.MEAT);
     }
     playMobDeathSound();
@@ -2160,21 +2458,53 @@ function tryMobMove(mob, nx, nz, dt) {
   return true;
 }
 
+// Steers a mob toward (dirX,dirZ); if that step is blocked (wall/cliff), it
+// tries increasingly wide angles left and right of the direct line instead
+// of just giving up -- a lightweight "walk around the obstacle" heuristic
+// (not real pathfinding, but enough that a zombie no longer gets stuck
+// pressed against a wall it can see the player through).
+function stepMobToward(mob, dirX, dirZ, speed, dt) {
+  const baseAngle = Math.atan2(dirX, dirZ);
+  for (const delta of [0, 0.6, -0.6, 1.2, -1.2, 1.8, -1.8]) {
+    const angle = baseAngle + delta;
+    const tdx = Math.sin(angle), tdz = Math.cos(angle);
+    const nx = mob.pos.x + tdx * speed * dt, nz = mob.pos.z + tdz * speed * dt;
+    if (tryMobMove(mob, nx, nz, dt)) {
+      if (delta === 0) mob.facing = baseAngle; // only face the walk direction when not detouring, so it still looks toward the target
+      return true;
+    }
+  }
+  return false;
+}
+
 function updateMobs(dt) {
   for (const mob of mobs) {
     if (mob.hurtFlashTimer > 0) mob.hurtFlashTimer -= dt;
+    if (mob.shootCooldown > 0) mob.shootCooldown -= dt;
     const isZombie = mob.type === MOB_TYPES.ZOMBIE;
+    const isSkeleton = mob.type === MOB_TYPES.SKELETON;
     const dxp = player.pos.x - mob.pos.x, dzp = player.pos.z - mob.pos.z;
     const distToPlayer = Math.hypot(dxp, dzp);
 
-    let dirX, dirZ;
+    if (isSkeleton && distToPlayer < 14 && mob.shootCooldown <= 0) {
+      mob.shootCooldown = 2.2;
+      mob.facing = Math.atan2(dxp, dzp);
+      spawnArrow(new THREE.Vector3(mob.pos.x, mob.pos.y + mob.eyeHeight * 0.6, mob.pos.z), player.pos);
+    }
+
+    let dirX, dirZ, moving = false;
     if (isZombie && distToPlayer < 12) {
       dirX = dxp / (distToPlayer || 1);
       dirZ = dzp / (distToPlayer || 1);
       mob.facing = Math.atan2(dirX, dirZ);
-      if (distToPlayer < 1.1) {
-        damagePlayer(2);
-      }
+      moving = true;
+      if (distToPlayer < 1.1) damagePlayer(2);
+    } else if (isSkeleton && distToPlayer < 14 && distToPlayer > 6) {
+      // skeletons keep some distance instead of charging in for melee
+      dirX = dxp / (distToPlayer || 1);
+      dirZ = dzp / (distToPlayer || 1);
+      mob.facing = Math.atan2(dxp, dzp);
+      moving = true;
     } else {
       mob.wanderTimer -= dt;
       if (mob.wanderTimer <= 0) {
@@ -2188,14 +2518,13 @@ function updateMobs(dt) {
         dirX = Math.sin(mob.wanderDir);
         dirZ = Math.cos(mob.wanderDir);
         mob.facing = mob.wanderDir;
+        moving = true;
       }
     }
 
     const speed = MOB_SPEED[mob.type];
-    if (dirX || dirZ) {
-      const nx = mob.pos.x + dirX * speed * dt;
-      const nz = mob.pos.z + dirZ * speed * dt;
-      if (!tryMobMove(mob, nx, nz, dt)) {
+    if (moving && (dirX || dirZ)) {
+      if (!stepMobToward(mob, dirX, dirZ, speed, dt)) {
         mob.wanderDir = Math.random() * Math.PI * 2;
       }
       mob.animT += dt * 8;
@@ -2203,7 +2532,7 @@ function updateMobs(dt) {
 
     mob.group.position.set(mob.pos.x, mob.pos.y, mob.pos.z);
     mob.group.rotation.y = mob.facing;
-    const swing = (dirX || dirZ) ? Math.sin(mob.animT) * 0.5 : 0;
+    const swing = moving ? Math.sin(mob.animT) * 0.5 : 0;
     mob.legs.forEach((leg, i) => { leg.rotation.x = (i % 2 === 0 ? swing : -swing); });
     mob.group.traverse((obj) => {
       if (!obj.isMesh) return;
@@ -2252,7 +2581,7 @@ document.addEventListener('pointerlockerror', () => {
 
 document.addEventListener('mousemove', (e) => {
   if (!isLocked) return;
-  const sensitivity = 0.0022;
+  const sensitivity = 0.0022 * mouseSensitivityMul;
   player.yaw -= e.movementX * sensitivity;
   player.pitch -= e.movementY * sensitivity;
   const limit = Math.PI / 2 - 0.05;
@@ -2280,6 +2609,15 @@ const hotbarEl = document.getElementById('hotbar');
 const inventoryPanel = document.getElementById('inventoryPanel');
 const inventoryGrid = document.getElementById('inventoryGrid');
 const craftingListEl = document.getElementById('craftingList');
+// Furnace smelting DOM refs/state -- declared here (before renderInventoryPanel,
+// which calls renderSmelting() eagerly on the very next line after its own
+// definition) so they're initialized in time; a TDZ error here would abort
+// the rest of the script's top-level execution.
+let isSmelting = false;
+let smeltProgress = 0;
+const smeltRecipeLabelEl = document.getElementById('smeltRecipeLabel');
+const smeltProgressFillEl = document.getElementById('smeltProgressFill');
+const btnSmeltEl = document.getElementById('btnSmelt');
 
 function addToInventory(itemType, amount = 1) {
   inventory[itemType] = (inventory[itemType] || 0) + amount;
@@ -2338,8 +2676,47 @@ function renderInventoryPanel() {
     inventoryGrid.appendChild(slot);
   });
   renderCrafting();
+  renderSmelting();
 }
 renderInventoryPanel();
+
+// ---------- Furnace smelting (gated on owning a furnace; takes real time,
+// unlike the instant RECIPES crafting above) ----------
+function renderSmelting() {
+  const r = SMELT_RECIPE;
+  smeltRecipeLabelEl.textContent = `${itemLabel(r.input)} + ${itemLabel(r.fuel)} (bahan bakar) → ${itemLabel(r.output)} x${r.outputCount}`;
+  const hasFurnace = (inventory[BLOCK.FURNACE] || 0) > 0;
+  const hasInputs = (inventory[r.input] || 0) >= 1 && (inventory[r.fuel] || 0) >= 1;
+  btnSmeltEl.disabled = isSmelting || !hasFurnace || !hasInputs;
+  btnSmeltEl.textContent = !hasFurnace ? 'Butuh Furnace' : (isSmelting ? 'Melebur...' : 'Smelt');
+  smeltProgressFillEl.style.width = (smeltProgress * 100) + '%';
+}
+
+function startSmelting() {
+  const r = SMELT_RECIPE;
+  if (isSmelting) return;
+  if ((inventory[BLOCK.FURNACE] || 0) <= 0) { showToast('Butuh Furnace untuk melebur!'); return; }
+  if ((inventory[r.input] || 0) < 1 || (inventory[r.fuel] || 0) < 1) return;
+  inventory[r.input]--;
+  inventory[r.fuel]--;
+  isSmelting = true;
+  smeltProgress = 0;
+  renderInventoryPanel();
+}
+
+function updateSmelting(dt) {
+  if (!isSmelting) return;
+  smeltProgress += dt / SMELT_RECIPE.seconds;
+  if (smeltProgress >= 1) {
+    isSmelting = false;
+    smeltProgress = 0;
+    addToInventory(SMELT_RECIPE.output, SMELT_RECIPE.outputCount);
+    showToast('Berhasil melebur ' + itemLabel(SMELT_RECIPE.output));
+  }
+  if (inventoryOpen) renderSmelting();
+}
+
+btnSmeltEl.addEventListener('click', startSmelting);
 
 function craftRecipe(idx) {
   const recipe = RECIPES[idx];
@@ -2403,7 +2780,7 @@ document.addEventListener('wheel', (e) => {
 // Mouse buttons: mine (hold) / punch mobs / place
 let mouseDown0 = false;
 domElement.addEventListener('mousedown', (e) => {
-  if (!gameStarted || inventoryOpen) return;
+  if (!gameStarted || inventoryOpen || isDead) return;
   if (e.button === 0) {
     mouseDown0 = true;
     startMiningOrPunch();
@@ -2708,11 +3085,11 @@ if (isMobile) {
     el.addEventListener('touchcancel', () => { if (onEnd) onEnd(); });
   }
   bindHoldButton('btnJump', () => { keys['Space'] = true; }, () => { keys['Space'] = false; });
-  bindHoldButton('btnMine', () => { if (gameStarted && !inventoryOpen) { mouseDown0 = true; startMiningOrPunch(); } }, () => { mouseDown0 = false; stopMining(); });
+  bindHoldButton('btnMine', () => { if (gameStarted && !inventoryOpen && !isDead) { mouseDown0 = true; startMiningOrPunch(); } }, () => { mouseDown0 = false; stopMining(); });
   bindHoldButton('btnSprint', () => { keys['ShiftLeft'] = true; }, () => { keys['ShiftLeft'] = false; });
   document.getElementById('btnPlace').addEventListener('touchstart', (e) => {
     e.preventDefault();
-    if (gameStarted && !inventoryOpen) placeBlock();
+    if (gameStarted && !inventoryOpen && !isDead) placeBlock();
   });
   document.getElementById('btnInventory').addEventListener('touchstart', (e) => {
     e.preventDefault();
@@ -2741,7 +3118,7 @@ if (isMobile) {
       const dx = t.clientX - lastLookX, dy = t.clientY - lastLookY;
       lastLookX = t.clientX;
       lastLookY = t.clientY;
-      const sensitivity = 0.006;
+      const sensitivity = 0.006 * mouseSensitivityMul;
       player.yaw -= dx * sensitivity;
       player.pitch -= dy * sensitivity;
       const limit = Math.PI / 2 - 0.05;
@@ -2783,6 +3160,10 @@ document.getElementById('btnCloseInventory').addEventListener('click', () => {
   if (inventoryOpen) toggleInventory();
 });
 
+document.getElementById('btnRespawn').addEventListener('click', () => {
+  if (isDead) respawnPlayer();
+});
+
 // ---------- Main loop ----------
 let lastTime = performance.now();
 let autosaveAccumulator = 0;
@@ -2795,14 +3176,18 @@ function animate() {
   updateDayNightCycle(dt);
 
   if (gameStarted && !inventoryOpen) {
-    updatePhysics(dt);
-    updateMining(dt);
-    updateBlockHighlight();
+    if (!isDead) {
+      updatePhysics(dt);
+      updateMining(dt);
+      updateBlockHighlight();
+    }
     updateItemDrops(dt);
     updateMobs(dt);
-    updateHunger(dt);
+    updateProjectiles(dt);
+    if (!isDead) updateHunger(dt);
     updateChunkStreaming(dt);
     updateMultiplayer(dt);
+    updateSmelting(dt);
 
     autosaveAccumulator += dt;
     if (autosaveAccumulator > 30) {

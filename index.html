@@ -10,6 +10,7 @@
   <div id="crosshair"></div>
 
   <button id="btnFullscreen" title="Fullscreen">⛶</button>
+  <button id="btnSettings" title="Pengaturan">⚙</button>
 
   <div id="health"></div>
   <div id="hunger"></div>
@@ -23,7 +24,38 @@
     <h2>Inventory &amp; Crafting</h2>
     <div id="inventoryGrid"></div>
     <div id="craftingList"></div>
+    <h3>Smelting (butuh Furnace)</h3>
+    <div id="smeltingPanel">
+      <div id="smeltRecipeLabel"></div>
+      <div id="smeltProgressBar"><div id="smeltProgressFill"></div></div>
+      <button id="btnSmelt">Smelt</button>
+    </div>
     <p class="hint">Tekan E (atau tombol Tutup) &middot; F: makan daging &middot; O: simpan game</p>
+  </div>
+
+  <div id="settingsPanel" class="hidden">
+    <button id="btnCloseSettings">✕ Tutup</button>
+    <h2>Pengaturan</h2>
+    <div class="settings-row">
+      <label for="sliderSensitivity">Sensitivity mouse</label>
+      <input type="range" id="sliderSensitivity" min="0.3" max="2.5" step="0.1" />
+      <span id="sensitivityValue"></span>
+    </div>
+    <div class="settings-row">
+      <label for="sliderRenderDistance">Render distance (chunk)</label>
+      <input type="range" id="sliderRenderDistance" min="2" max="8" step="1" />
+      <span id="renderDistanceValue"></span>
+    </div>
+    <div class="settings-row">
+      <label for="sliderVolume">Volume suara</label>
+      <input type="range" id="sliderVolume" min="0" max="1" step="0.05" />
+      <span id="volumeValue"></span>
+    </div>
+  </div>
+
+  <div id="deathScreen" class="hidden">
+    <h1>Kamu Mati</h1>
+    <button id="btnRespawn">Respawn</button>
   </div>
 
   <div id="info">

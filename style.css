@@ -432,3 +432,177 @@ canvas {
 #btnCloseInventory:hover {
   background: #a93226;
 }
+
+#btnSettings {
+  position: fixed;
+  top: 10px;
+  right: 58px;
+  z-index: 30;
+  width: 40px;
+  height: 40px;
+  border-radius: 6px;
+  border: 2px solid rgba(255,255,255,0.4);
+  background: rgba(0,0,0,0.35);
+  color: white;
+  font-size: 20px;
+  cursor: pointer;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+#btnSettings:active {
+  background: rgba(255,255,255,0.25);
+}
+
+#settingsPanel {
+  position: fixed;
+  inset: 0;
+  z-index: 55;
+  background: rgba(10, 10, 15, 0.85);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  text-align: center;
+}
+
+#settingsPanel.hidden {
+  display: none;
+}
+
+#settingsPanel h2 {
+  margin-bottom: 18px;
+  text-shadow: 2px 2px 4px rgba(0,0,0,0.6);
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 340px;
+  margin-bottom: 14px;
+  font-size: 13px;
+}
+
+.settings-row label {
+  flex: 0 0 150px;
+  text-align: right;
+}
+
+.settings-row input[type="range"] {
+  flex: 1;
+}
+
+.settings-row span {
+  flex: 0 0 34px;
+  text-align: left;
+  opacity: 0.85;
+}
+
+#btnCloseSettings {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  padding: 8px 16px;
+  border: none;
+  border-radius: 6px;
+  background: #c0392b;
+  color: white;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+#btnCloseSettings:hover {
+  background: #a93226;
+}
+
+#inventoryPanel h3 {
+  margin-top: 16px;
+  margin-bottom: 8px;
+  font-size: 14px;
+  opacity: 0.9;
+}
+
+#smeltingPanel {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: rgba(0,0,0,0.4);
+  padding: 10px 14px;
+  border-radius: 8px;
+}
+
+#smeltRecipeLabel {
+  font-size: 12px;
+  min-width: 220px;
+  text-align: left;
+}
+
+#smeltProgressBar {
+  width: 120px;
+  height: 12px;
+  background: rgba(255,255,255,0.15);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+#smeltProgressFill {
+  height: 100%;
+  width: 0%;
+  background: #e67e22;
+  transition: width 0.1s linear;
+}
+
+#btnSmelt {
+  padding: 4px 14px;
+  border: none;
+  border-radius: 4px;
+  background: #4CAF50;
+  color: white;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+#btnSmelt:disabled {
+  background: #555;
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+#deathScreen {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  background: rgba(60, 5, 5, 0.82);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  text-align: center;
+}
+
+#deathScreen.hidden {
+  display: none;
+}
+
+#deathScreen h1 {
+  font-size: 42px;
+  margin-bottom: 20px;
+  text-shadow: 2px 2px 6px rgba(0,0,0,0.8);
+}
+
+#btnRespawn {
+  padding: 12px 28px;
+  font-size: 16px;
+  border: none;
+  border-radius: 6px;
+  background: #4CAF50;
+  color: white;
+  cursor: pointer;
+}
+
+#btnRespawn:hover {
+  background: #45a049;
+}
