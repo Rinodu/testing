@@ -506,6 +506,18 @@ function temperatureAt(x, z) {
 }
 const DESERT_THRESHOLD = 0.35;
 const SNOW_THRESHOLD = -0.35;
+const BIOME_BLEND = 0.12; // half-width of the dithered transition band around each threshold
+
+// Instead of one hard line at the threshold, blocks within BIOME_BLEND of it
+// are probabilistically dithered (chance scales linearly across the band),
+// so biome borders look like a speckled blend rather than a single sharp
+// edge -- still fully deterministic per-coordinate via hash2D.
+function ditheredOver(x, z, temp, threshold, salt) {
+  const diff = temp - threshold;
+  if (diff > BIOME_BLEND) return true;
+  if (diff < -BIOME_BLEND) return false;
+  return hash2D(x, z, salt) < (diff + BIOME_BLEND) / (2 * BIOME_BLEND);
+}
 
 // ---------- World data (chunk-based, generated on demand around the player) ----------
 class World {
@@ -585,8 +597,8 @@ function generateChunkTerrain(world, chunk) {
       const n = fractalNoise(x, z);
       const h = Math.max(2, Math.min(world.height - 4, Math.floor(baseHeight + n * 8)));
       const temp = temperatureAt(x, z);
-      const isDesert = temp > DESERT_THRESHOLD;
-      const isSnowy = temp < SNOW_THRESHOLD;
+      const isDesert = ditheredOver(x, z, temp, DESERT_THRESHOLD, 6001);
+      const isSnowy = !isDesert && !ditheredOver(x, z, temp, SNOW_THRESHOLD, 6002);
       for (let y = 0; y <= h; y++) {
         // Caves: only carve deep stone (never the surface/dirt crust, and
         // never y<=1 so there's always a solid floor under the world).
@@ -622,7 +634,8 @@ function generateChunkTerrain(world, chunk) {
     for (let z = z0; z < z0 + CHUNK_SIZE; z++) {
       const h = world.heightAt(x, z);
       const surfaceIsGrassy = world.get(x, h, z) === BLOCK.GRASS || world.get(x, h, z) === BLOCK.SNOW;
-      if (h > 0 && surfaceIsGrassy && temperatureAt(x, z) <= DESERT_THRESHOLD && hash2D(x, z, TREE_SEED) < 0.01) {
+      const notDesertHere = !ditheredOver(x, z, temperatureAt(x, z), DESERT_THRESHOLD, 6001);
+      if (h > 0 && surfaceIsGrassy && notDesertHere && hash2D(x, z, TREE_SEED) < 0.01) {
         const trunkHeight = 3 + Math.floor(hash2D(x, z, TREE_SEED + 1) * 2);
         for (let t = 1; t <= trunkHeight; t++) world.set(x, h + t, z, BLOCK.WOOD);
         const topY = h + trunkHeight;
@@ -758,6 +771,43 @@ function buildChunkMesh(world, chunk) {
 // the opaque chunk material would make solid blocks transparent too). Only
 // faces touching true air are emitted -- water-to-water and water-to-ground
 // faces are never visible. Returns null when the chunk has no water.
+// Shared by every chunk's water mesh (rather than one material per chunk) so
+// there's a single `time` uniform to tick per frame for the wave/sparkle
+// animation, and so disposing one chunk's water mesh on unload never affects
+// any other chunk still using the same material.
+const waterMaterial = new THREE.ShaderMaterial({
+  uniforms: { time: { value: 0 } },
+  transparent: true,
+  depthWrite: false,
+  side: THREE.DoubleSide,
+  vertexShader: `
+    uniform float time;
+    varying vec3 vWorldPos;
+    varying float vWave;
+    void main() {
+      vec3 pos = position;
+      float wave = sin(pos.x * 0.6 + time * 1.6) * 0.06 + cos(pos.z * 0.5 + time * 1.3) * 0.06;
+      pos.y += wave;
+      vWave = wave;
+      vec4 worldPosition = modelMatrix * vec4(pos, 1.0);
+      vWorldPos = worldPosition.xyz;
+      gl_Position = projectionMatrix * viewMatrix * worldPosition;
+    }
+  `,
+  fragmentShader: `
+    uniform float time;
+    varying vec3 vWorldPos;
+    varying float vWave;
+    void main() {
+      vec3 base = vec3(0.16, 0.42, 0.82);
+      float sparkle = sin(vWorldPos.x * 3.0 + time * 3.0) * sin(vWorldPos.z * 3.0 - time * 2.2);
+      sparkle = smoothstep(0.85, 1.0, sparkle) * 0.5;
+      vec3 color = base + vec3(sparkle) + vec3(vWave * 0.6);
+      gl_FragColor = vec4(color, 0.6);
+    }
+  `,
+});
+
 function buildChunkWaterMesh(world, chunk) {
   const x0 = chunk.cx * CHUNK_SIZE, z0 = chunk.cz * CHUNK_SIZE;
   const positions = [];
@@ -791,11 +841,115 @@ function buildChunkWaterMesh(world, chunk) {
   geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
   geometry.setIndex(indices);
 
-  const material = new THREE.MeshLambertMaterial({
-    color: 0x2a6fd6, transparent: true, opacity: 0.55, side: THREE.DoubleSide, depthWrite: false,
-  });
-  const mesh = new THREE.Mesh(geometry, material);
+  const mesh = new THREE.Mesh(geometry, waterMaterial);
   return mesh;
+}
+
+// ---------- Animated grass tufts (decorative, swaying billboards on grass) ----------
+// Real blade-level geometry, not just a tinted block face, so it needs its
+// own small cross-quad mesh per tuft -- merged into one BufferGeometry per
+// chunk for performance, sharing one material/time-uniform like water does.
+const TUFT_HEIGHT = 0.6;
+
+function buildGrassTuftTexture() {
+  const c = document.createElement('canvas');
+  c.width = c.height = 16;
+  const ctx = c.getContext('2d');
+  ctx.clearRect(0, 0, 16, 16);
+  const rnd = seededRandomFn(9090);
+  ctx.fillStyle = '#4a9c3a';
+  for (let i = 0; i < 5; i++) {
+    const bx = 2 + rnd() * 12;
+    ctx.beginPath();
+    ctx.moveTo(bx - 1, 16);
+    ctx.lineTo(bx + 1, 16);
+    ctx.lineTo(bx + (rnd() - 0.5) * 3, 2);
+    ctx.closePath();
+    ctx.fill();
+  }
+  const tex = new THREE.CanvasTexture(c);
+  tex.magFilter = THREE.NearestFilter;
+  tex.minFilter = THREE.NearestFilter;
+  tex.generateMipmaps = false;
+  return tex;
+}
+
+// The `sway` attribute is 1 on a quad's top vertices and 0 on its base, so
+// the wind displacement pivots around the anchored base like a real blade
+// instead of translating the whole quad.
+const grassTuftMaterial = new THREE.ShaderMaterial({
+  uniforms: { time: { value: 0 }, map: { value: buildGrassTuftTexture() } },
+  transparent: true,
+  side: THREE.DoubleSide,
+  depthWrite: false,
+  vertexShader: `
+    uniform float time;
+    attribute float sway;
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      vec3 pos = position;
+      float wind = sin(time * 2.0 + pos.x * 0.8 + pos.z * 0.8) * 0.12;
+      pos.x += wind * sway;
+      pos.z += wind * 0.6 * sway;
+      gl_Position = projectionMatrix * viewMatrix * modelMatrix * vec4(pos, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform sampler2D map;
+    varying vec2 vUv;
+    void main() {
+      vec4 tex = texture2D(map, vUv);
+      if (tex.a < 0.5) discard;
+      gl_FragColor = vec4(tex.rgb, 1.0);
+    }
+  `,
+});
+
+function buildChunkGrassMesh(world, chunk) {
+  const x0 = chunk.cx * CHUNK_SIZE, z0 = chunk.cz * CHUNK_SIZE;
+  const positions = [];
+  const sways = [];
+  const uvs = [];
+  const indices = [];
+  let vertCount = 0;
+
+  function addQuad(cx, cz, y, angle) {
+    const dx = Math.cos(angle) * 0.45, dz = Math.sin(angle) * 0.45;
+    const base = vertCount;
+    positions.push(
+      cx - dx, y, cz - dz,
+      cx + dx, y, cz + dz,
+      cx + dx, y + TUFT_HEIGHT, cz + dz,
+      cx - dx, y + TUFT_HEIGHT, cz - dz
+    );
+    sways.push(0, 0, 1, 1);
+    uvs.push(0, 0, 1, 0, 1, 1, 0, 1);
+    indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
+    vertCount += 4;
+  }
+
+  for (let x = x0; x < x0 + CHUNK_SIZE; x++) {
+    for (let z = z0; z < z0 + CHUNK_SIZE; z++) {
+      const h = world.heightAt(x, z);
+      if (h <= 0 || world.get(x, h, z) !== BLOCK.GRASS) continue;
+      if (world.get(x, h + 1, z) !== BLOCK.AIR) continue;
+      if (hash2D(x, z, 8181) > 0.22) continue; // ~22% of grass columns get a tuft
+      const cx = x + 0.5 + (hash2D(x, z, 8182) - 0.5) * 0.3;
+      const cz = z + 0.5 + (hash2D(x, z, 8183) - 0.5) * 0.3;
+      addQuad(cx, cz, h + 1, 0);
+      addQuad(cx, cz, h + 1, Math.PI / 2);
+    }
+  }
+
+  if (vertCount === 0) return null;
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute('sway', new THREE.Float32BufferAttribute(sways, 1));
+  geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  geometry.setIndex(indices);
+  return new THREE.Mesh(geometry, grassTuftMaterial);
 }
 
 // ---------- Three.js setup ----------
@@ -812,6 +966,9 @@ const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.outputEncoding = THREE.sRGBEncoding;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.15;
 document.body.appendChild(renderer.domElement);
 
 // Gradient sky dome
@@ -847,6 +1004,64 @@ const skyMat = new THREE.ShaderMaterial({
 });
 const skyMesh = new THREE.Mesh(skyGeo, skyMat);
 scene.add(skyMesh);
+
+// Stars: fade in at night, fade out during the day (opacity driven in
+// updateDayNightCycle). Sits just inside the sky dome, same BackSide trick.
+function buildStarTexture() {
+  const c = document.createElement('canvas');
+  c.width = c.height = 512;
+  const ctx = c.getContext('2d');
+  const rnd = seededRandomFn(7777);
+  for (let i = 0; i < 700; i++) {
+    const x = rnd() * 512, y = rnd() * 512;
+    const r = rnd() * 1.3 + 0.3;
+    ctx.fillStyle = `rgba(255,255,255,${(0.5 + rnd() * 0.5).toFixed(2)})`;
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  return new THREE.CanvasTexture(c);
+}
+const starsMesh = new THREE.Mesh(
+  new THREE.SphereGeometry(390, 24, 12),
+  new THREE.MeshBasicMaterial({ map: buildStarTexture(), transparent: true, opacity: 0, depthWrite: false, side: THREE.BackSide })
+);
+scene.add(starsMesh);
+
+// Clouds: one large drifting semi-transparent plane high above the world;
+// the texture tiles seamlessly (blobs painted with wrapped copies at the
+// edges) and its UV offset is nudged forward each frame to drift slowly.
+function buildCloudTexture() {
+  const c = document.createElement('canvas');
+  c.width = c.height = 256;
+  const ctx = c.getContext('2d');
+  const rnd = seededRandomFn(3131);
+  function blob(x, y, w, h) {
+    ctx.beginPath();
+    ctx.ellipse(x, y, w, h, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.fillStyle = 'rgba(255,255,255,0.85)';
+  for (let i = 0; i < 26; i++) {
+    const x = rnd() * 256, y = rnd() * 256;
+    const w = 30 + rnd() * 50, h = 14 + rnd() * 18;
+    blob(x, y, w, h);
+    blob(x - 256, y, w, h); blob(x + 256, y, w, h);
+    blob(x, y - 256, w, h); blob(x, y + 256, w, h);
+  }
+  return new THREE.CanvasTexture(c);
+}
+const cloudTexture = buildCloudTexture();
+cloudTexture.wrapS = THREE.RepeatWrapping;
+cloudTexture.wrapT = THREE.RepeatWrapping;
+cloudTexture.repeat.set(6, 6);
+const cloudsMesh = new THREE.Mesh(
+  new THREE.PlaneGeometry(900, 900),
+  new THREE.MeshBasicMaterial({ map: cloudTexture, transparent: true, opacity: 0.55, depthWrite: false, side: THREE.DoubleSide })
+);
+cloudsMesh.rotation.x = -Math.PI / 2;
+cloudsMesh.position.y = 130;
+scene.add(cloudsMesh);
 
 // Sun & moon glow sprites
 function buildGlowTexture(colorStops) {
@@ -943,6 +1158,9 @@ function updateDayNightCycle(dt) {
   nightColor.copy(SKY_HORIZON_NIGHT);
   skyMat.uniforms.bottomColor.value.copy(nightColor).lerp(dayColor, mix);
   scene.fog.color.copy(skyMat.uniforms.bottomColor.value);
+
+  starsMesh.material.opacity = Math.max(0, 1 - daylight * 1.6) * 0.9;
+  cloudsMesh.material.opacity = 0.25 + daylight * 0.3; // thinner at night so stars show through
 }
 
 // ---------- Multiplayer (optional shared-world sync via a small WebSocket relay) ----------
@@ -1226,6 +1444,7 @@ function getBlockIconURL(blockType) {
 const world = new World(WORLD_HEIGHT);
 const chunkMeshes = new Map(); // "cx,cz" -> THREE.Mesh (opaque blocks)
 const chunkWaterMeshes = new Map(); // "cx,cz" -> THREE.Mesh (transparent water), absent if chunk has none
+const chunkGrassMeshes = new Map(); // "cx,cz" -> THREE.Mesh (swaying grass tufts), absent if chunk has none
 
 // ---------- Torches (placeable light source) ----------
 // A torch is a real block in the voxel grid (mineable, placeable, saved with
@@ -1309,9 +1528,16 @@ function remeshChunk(cx, cz) {
   chunkMeshes.set(key, mesh);
 
   const oldWater = chunkWaterMeshes.get(key);
-  if (oldWater) { scene.remove(oldWater); oldWater.geometry.dispose(); oldWater.material.dispose(); chunkWaterMeshes.delete(key); }
+  // Note: don't dispose oldWater.material -- it's the single shared waterMaterial.
+  if (oldWater) { scene.remove(oldWater); oldWater.geometry.dispose(); chunkWaterMeshes.delete(key); }
   const waterMesh = buildChunkWaterMesh(world, chunk);
   if (waterMesh) { scene.add(waterMesh); chunkWaterMeshes.set(key, waterMesh); }
+
+  const oldGrass = chunkGrassMeshes.get(key);
+  // Note: don't dispose oldGrass.material -- it's the single shared grassTuftMaterial.
+  if (oldGrass) { scene.remove(oldGrass); oldGrass.geometry.dispose(); chunkGrassMeshes.delete(key); }
+  const grassMesh = buildChunkGrassMesh(world, chunk);
+  if (grassMesh) { scene.add(grassMesh); chunkGrassMeshes.set(key, grassMesh); }
 
   syncTorchesForChunk(chunk);
 
@@ -1372,10 +1598,17 @@ function updateChunkStreaming(dt) {
       chunkMeshes.delete(key);
       const waterMesh = chunkWaterMeshes.get(key);
       if (waterMesh) {
+        // Note: don't dispose waterMesh.material -- it's the single shared waterMaterial.
         scene.remove(waterMesh);
         waterMesh.geometry.dispose();
-        waterMesh.material.dispose();
         chunkWaterMeshes.delete(key);
+      }
+      const grassMesh = chunkGrassMeshes.get(key);
+      if (grassMesh) {
+        // Note: don't dispose grassMesh.material -- it's the single shared grassTuftMaterial.
+        scene.remove(grassMesh);
+        grassMesh.geometry.dispose();
+        chunkGrassMeshes.delete(key);
       }
       removeTorchesInChunk(cx, cz);
     }
@@ -2578,10 +2811,22 @@ function animate() {
     }
   }
 
-  // Sky dome is a fixed-radius sphere; it must stay centered on the camera or
-  // it gets left behind once the player wanders far from world origin (the
-  // chunk-streamed world has no real boundary), exposing black void past its edge.
+  // Sky dome/stars are fixed-radius spheres; they must stay centered on the
+  // camera or they get left behind once the player wanders far from world
+  // origin (the chunk-streamed world has no real boundary), exposing black
+  // void past its edge.
   skyMesh.position.copy(camera.position);
+  starsMesh.position.copy(camera.position);
+
+  // Clouds: follow the player horizontally (same reason as the sky dome)
+  // while the texture offset drifts slowly for a moving-cloud feel.
+  cloudsMesh.position.x = camera.position.x;
+  cloudsMesh.position.z = camera.position.z;
+  cloudTexture.offset.x += dt * 0.004;
+  cloudTexture.offset.y += dt * 0.0012;
+
+  waterMaterial.uniforms.time.value += dt;
+  grassTuftMaterial.uniforms.time.value += dt;
 
   renderer.render(scene, camera);
 }
